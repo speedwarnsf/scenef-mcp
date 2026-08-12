@@ -2,9 +2,15 @@
 
 # SceneF — San Francisco Movie Showtimes (MCP server)
 
-Every movie showtime in San Francisco — the chains, the independents, and the
-repertory houses — verified against each theater's own box office. Remote MCP
-server, streamable HTTP, no API key, read-only.
+Built by movie lovers, for movie lovers and their assistants.
+
+San Francisco is one of the last great moviegoing cities — single-screen
+neighborhood houses from the 1920s, repertory calendars that change nightly,
+35mm and 70mm prints, midnight movies, and yes, the multiplexes too. SceneF
+puts every screen in the city on one board and verifies each showtime against
+the theater's own box office, so nobody ever drives to a dark theater.
+
+Remote MCP server, streamable HTTP, no API key, read-only.
 
 ```
 https://scenef.com/mcp
@@ -47,8 +53,11 @@ Also listed in the official MCP registry as `com.scenef/showtimes`.
 | `scenef_now` | Right-now snapshot: what's catchable at this hour |
 | `scenef_accuracy` | Our own verification record — checks run, failed, and unreachable |
 
-Every ticket link is a direct door to the vendor's own page. No ads, no
-pay-ranking; ranking is pure preference-scoring and nothing is ever hidden.
+Every ticket link is a direct door to the theater's own box office. No ads,
+no pay-ranking; ranking is pure preference-scoring and nothing is ever
+hidden. The repertory houses get the same billing as the chains — a lone
+35mm print at a neighborhood house is exactly the kind of thing this server
+exists to surface.
 
 ## Why trust it
 
