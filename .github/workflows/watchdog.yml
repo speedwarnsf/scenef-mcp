@@ -1,0 +1,67 @@
+# The outside-in watchdog — because everything else assumes scenef.com is up.
+# Every 15 minutes: the board answers, the data is fresh, the MCP endpoint
+# speaks. Any failure pushes to ntfy (topic held as a secret). A red run here
+# is the site being down, not this repo being broken.
+name: watchdog
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      test_alert:
+        description: "Send a test ntfy ping regardless of health"
+        default: "false"
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: check the board, the clock, and the MCP door
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          set -u
+          FAILS=""
+
+          # 1. The listings feed answers and carries a live board.
+          BODY=$(curl -sS -m 20 "https://scenef.com/api/listings?when=tonight&compact=1" || echo "")
+          COUNT=$(echo "$BODY" | python3 -c "import sys,json;print(json.load(sys.stdin)['counts']['screenings'])" 2>/dev/null || echo "unreadable")
+          if ! [ "$COUNT" -ge 1 ] 2>/dev/null; then FAILS="$FAILS\n- /api/listings unreadable or empty (count=$COUNT)"; fi
+
+          # 2. The data is fresh: data_as_of within 26h (both daily ingests
+          #    missing = the pipeline is dead even if the site serves).
+          AGE_OK=$(echo "$BODY" | python3 -c "
+          import sys, json, datetime
+          d = json.load(sys.stdin)
+          t = datetime.datetime.fromisoformat(d['data_as_of'].replace('Z','+00:00'))
+          age = (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds()
+          print('ok' if age < 26*3600 else 'stale %dh' % (age//3600))
+          " 2>/dev/null || echo "unreadable")
+          if [ "$AGE_OK" != "ok" ]; then FAILS="$FAILS\n- data_as_of: $AGE_OK"; fi
+
+          # 3. The MCP endpoint answers a tools/list.
+          MCP=$(curl -sS -m 20 -o /dev/null -w "%{http_code}" -X POST "https://scenef.com/mcp" \
+            -H "content-type: application/json" -H "accept: application/json, text/event-stream" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' || echo "000")
+          if [ "$MCP" != "200" ]; then FAILS="$FAILS\n- /mcp HTTP $MCP"; fi
+
+          # 4. The homepage itself.
+          HOME=$(curl -sS -m 20 -o /dev/null -w "%{http_code}" "https://scenef.com/" || echo "000")
+          if [ "$HOME" != "200" ]; then FAILS="$FAILS\n- homepage HTTP $HOME"; fi
+
+          if [ "${{ inputs.test_alert || 'false' }}" = "true" ]; then
+            curl -sS -m 10 -H "Title: SceneF watchdog test" -H "Priority: default" \
+              -d "Test ping — the watchdog can reach you. Board count right now: $COUNT." \
+              "https://ntfy.sh/$NTFY_TOPIC" >/dev/null || true
+            echo "test alert sent"
+          fi
+
+          if [ -n "$FAILS" ]; then
+            printf "FAILING:%b\n" "$FAILS"
+            curl -sS -m 10 -H "Title: SceneF is unhealthy" -H "Priority: high" -H "Tags: rotating_light" \
+              -d "$(printf 'Watchdog failures:%b\nChecked from GitHub Actions.' "$FAILS")" \
+              "https://ntfy.sh/$NTFY_TOPIC" >/dev/null || true
+            exit 1
+          fi
+          echo "healthy: $COUNT screenings on the board, data fresh, mcp 200, homepage 200"
