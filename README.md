@@ -39,6 +39,14 @@ claude mcp add --transport http scenef https://scenef.com/mcp
 
 Also listed in the official MCP registry as `com.scenef/showtimes`.
 
+**stdio-only client?** The bundled Dockerfile runs a thin
+[`mcp-remote`](https://github.com/geelen/mcp-remote) bridge to the hosted
+endpoint, or run it directly:
+
+```bash
+npx -y mcp-remote https://scenef.com/mcp
+```
+
 ## Tools
 
 | Tool | What it answers |
