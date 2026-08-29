@@ -10,7 +10,9 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SERVER = resolve(here, "..", "server.js");
@@ -104,6 +106,28 @@ const badVenue = await client.callTool({ name: "scenef_search_showtimes", argume
 check(!badVenue.isError && Array.isArray(badVenue.structuredContent?.unknown_venues), "an unknown theater is reported, not dropped");
 const badWhen = await client.callTool({ name: "scenef_whats_playing", arguments: { when: "someday", max_results: 1 } });
 check(typeof badWhen.structuredContent?.note === "string" && badWhen.structuredContent.note.includes("Unrecognized"), "an unusable when is reported, never silently swallowed");
+
+// THE WAY IT IS ACTUALLY INSTALLED. npm and npx put the bin in
+// node_modules/.bin as a symlink, so argv[1] is the link and import.meta.url
+// is the real file. A start guard that compares them naively never fires:
+// the process exits 0 having printed nothing, and the client reports a
+// connection that closed with no error to explain it. The README's own
+// install command hit exactly this, so it is a test now.
+console.log("\nlaunched through a symlink, the way npm and npx install it");
+const linkDir = mkdtempSync(join(tmpdir(), "scenef-bin-"));
+const link = join(linkDir, "scenef-mcp");
+symlinkSync(SERVER, link);
+try {
+  const viaLink = new Client({ name: "scenef-contract-test", version: "1.0.0" });
+  await viaLink.connect(new StdioClientTransport({ command: process.execPath, args: [link] }));
+  const linked = await viaLink.listTools();
+  check(linked.tools.length === 9, "a symlinked launch serves all nine tools", String(linked.tools.length));
+  await viaLink.close();
+} catch (err) {
+  check(false, "a symlinked launch starts at all", err?.message ?? String(err));
+} finally {
+  rmSync(linkDir, { recursive: true, force: true });
+}
 
 await client.close();
 console.log(`\n${failures === 0 ? "PASS" : `FAIL — ${failures} check(s)`}`);

@@ -13,6 +13,8 @@
 // stdout belongs to the protocol. Anything this process wants to say goes to
 // stderr, or it corrupts the stream.
 
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ACCURACY_CONTRACT, TOOLS } from "./src/tools.js";
@@ -42,8 +44,18 @@ async function main() {
   process.stderr.write(`scenef-mcp ${SERVER_VERSION} ready on stdio — ${TOOLS.length} tools, reading ${process.env.SCENEF_BASE_URL ?? "https://scenef.com"}\n`);
 }
 
-// Only run when executed, so the test can import createServer().
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+// Run when executed, stay quiet when imported.
+//
+// THIS GUARD MUST FOLLOW THE SYMLINK. Comparing import.meta.url against a
+// bare `file://${process.argv[1]}` looked right and was wrong the moment
+// anyone installed this the documented way: npm and npx put the bin in
+// node_modules/.bin as a SYMLINK, so argv[1] is the link and import.meta.url
+// is the real file. They never matched, main() never ran, and the process
+// exited 0 having said nothing at all — which a stdio client reports as a
+// server that closed the connection, with no error to explain it. realpath
+// resolves the link; pathToFileURL survives spaces in the path.
+const invokedAs = process.argv[1] ? pathToFileURL(realpathSync(process.argv[1])).href : null;
+if (invokedAs === import.meta.url) {
   main().catch((err) => {
     process.stderr.write(`scenef-mcp failed to start: ${err?.stack ?? err}\n`);
     process.exit(1);
