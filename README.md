@@ -10,7 +10,8 @@ neighborhood houses from the 1920s, repertory calendars that change nightly,
 puts every screen in the city on one board and verifies each showtime against
 the theater's own box office, so nobody ever drives to a dark theater.
 
-Remote MCP server, streamable HTTP, no API key, read-only.
+Remote MCP server, streamable HTTP, no API key, read-only — and a local
+stdio server in this repo, running the same nine tools.
 
 ```
 https://scenef.com/mcp
@@ -39,13 +40,49 @@ claude mcp add --transport http scenef https://scenef.com/mcp
 
 Also listed in the official MCP registry as `com.scenef/showtimes`.
 
-**stdio-only client?** The bundled Dockerfile runs a thin
-[`mcp-remote`](https://github.com/geelen/mcp-remote) bridge to the hosted
-endpoint, or run it directly:
+## Or run it locally
+
+This repo is also a **local MCP server** — Node, stdio, no proxy. It speaks
+the protocol itself and reads the same board over SceneF's public REST API.
+Same nine tools, same schemas, same descriptions, same numbers; pick the
+transport your client prefers.
 
 ```bash
-npx -y mcp-remote https://scenef.com/mcp
+npx -y github:speedwarnsf/scenef-mcp
 ```
+
+**Claude Desktop / any stdio client**
+
+```json
+{
+  "mcpServers": {
+    "scenef": {
+      "command": "npx",
+      "args": ["-y", "github:speedwarnsf/scenef-mcp"]
+    }
+  }
+}
+```
+
+**From a clone, or Docker**
+
+```bash
+npm install && npm start
+```
+
+```bash
+docker build -t scenef-mcp . && docker run --rm -i scenef-mcp
+```
+
+No API key, no account, no configuration. It sends `User-Agent:
+scenef-mcp-local/1.0`, issues nothing but `GET`, and has no write path
+anywhere in it.
+
+`npm test` runs two suites: `test/contract.js` calls all nine tools against
+the live board and validates every payload against the output schema the
+server advertises, and `test/parity.js` diffs this server's tool definitions
+against the hosted endpoint's — one contract, two transports, proven rather
+than asserted.
 
 ## Tools
 

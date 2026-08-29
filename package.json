@@ -1,0 +1,46 @@
+{
+  "name": "scenef-mcp",
+  "version": "1.0.0",
+  "description": "San Francisco movie showtimes over MCP — every screen in the city, verified against each theater's own box office. Local stdio server, read-only, no API key.",
+  "license": "MIT",
+  "type": "module",
+  "main": "server.js",
+  "bin": {
+    "scenef-mcp": "server.js"
+  },
+  "files": [
+    "server.js",
+    "src/",
+    "glama.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/contract.js && node test/parity.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "movies",
+    "showtimes",
+    "cinema",
+    "san-francisco",
+    "film"
+  ],
+  "homepage": "https://scenef.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/speedwarnsf/scenef-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/speedwarnsf/scenef-mcp/issues"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.2",
+    "zod": "^3.25.76"
+  }
+}
