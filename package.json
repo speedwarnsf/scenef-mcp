@@ -1,7 +1,7 @@
 {
   "name": "scenef-mcp",
-  "version": "1.0.0",
-  "description": "San Francisco movie showtimes over MCP — every screen in the city, verified against each theater's own box office. Local stdio server, read-only, no API key.",
+  "version": "1.1.0",
+  "description": "Movie showtimes across California and Hawaii over MCP — 33 regional boards, chains, indies, and repertory houses, verified against each theater's own calendar. Local stdio server, read-only, no API key.",
   "license": "MIT",
   "type": "module",
   "main": "server.js",

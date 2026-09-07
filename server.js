@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// SceneF — San Francisco movie showtimes, as a LOCAL MCP server over stdio.
+// SceneF — movie showtimes across California and Hawaii, as a LOCAL MCP
+// server over stdio.
 //
 // This process IS the server: it implements the protocol itself and reads its
 // data from SceneF's public, key-less REST contract (https://scenef.com/agents).
@@ -20,11 +21,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ACCURACY_CONTRACT, TOOLS } from "./src/tools.js";
 
 export const SERVER_NAME = "scenef";
-export const SERVER_VERSION = "1.0.0";
+export const SERVER_VERSION = "1.1.0";
 
 /** What the server tells a client at initialize — the hosted server's words. */
 export const INSTRUCTIONS = [
-  "Read-only San Francisco movie showtimes. Ticket links are always https://scenef.com/go/{screeningId}; film pages https://scenef.com/film/{slug}. Times are SF wall-clock. Start with scenef_now to check freshness, scenef_plan_movie_night for recommendations.",
+  "Read-only movie showtimes across 33 regional boards in California and Hawaii — chains, independents, repertory and drive-ins. EVERY TOOL TAKES A `region`; omitted means the default board, and it is never inferred from where you are. Call scenef_now for the list of boards. TIMES ARE THE THEATRE'S OWN WALL CLOCK, not one city's — Hawaii is three hours off Pacific and keeps no DST, so a board's timezone is reported with its data and is the only zone its times mean anything in. A screening belongs to the NIGHT it opens: a 12:15am Saturday show is Friday night. Ticket links are always https://scenef.com/go/{screeningId}; film pages https://scenef.com/film/{slug}, or /film/{slug}/{regionSlug} for a specific board. Start with scenef_now to check freshness, scenef_plan_movie_night for recommendations.",
   ACCURACY_CONTRACT,
   'Call scenef_accuracy for that record as numbers you can quote, or pass response_format: "detailed" to any showtime tool to get the confidence level and verified_at on each showtime. Chain showtimes (AMC, Regal, Apple Cinemas), when present, are licensed from an aggregator rather than read from the theater — they are labeled source_tier licensed-feed and carry the weakest claim on the site.',
 ].join(" ");

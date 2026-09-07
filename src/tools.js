@@ -14,7 +14,7 @@
 // contract at https://scenef.com/agents. Both answer from the same numbers.
 
 import { z } from "zod";
-import { SITE, accuracyRecord, listings, shiftDate, tonightNight } from "./feed.js";
+import { SITE, accuracyRecord, boardsList, listings, shiftDate, tonightNight } from "./feed.js";
 import {
   baseOf,
   both,
@@ -53,6 +53,17 @@ const whenParam = z
   .optional()
   .describe(
     'When to look: "tonight" (default), "tomorrow", "weekend" (Fri/Sat/Sun of the current week), or a YYYY-MM-DD date.',
+  );
+
+// The hosted server's words, verbatim — every tool takes it (ONE CONTRACT,
+// TWO TRANSPORTS, above). The feed refuses an unknown region with a 400
+// naming the valid list, and getJson passes that correction through, so the
+// "error, not a fallback" promise below is the API's own behavior.
+const regionParam = z
+  .string()
+  .optional()
+  .describe(
+    'Which regional board to read, e.g. "sf", "oahu", "sacramento". Omitted means the default board — it is never inferred from where you are. Call scenef_now for the full list; an unknown region is an error, not a fallback.',
   );
 
 /**
@@ -95,7 +106,7 @@ const isDetailed = (args) => args?.response_format === "detailed";
 
 async function windowFor(when, extra = {}) {
   const raw = String(when ?? "tonight").trim().toLowerCase();
-  const t = await tonightNight();
+  const t = await tonightNight(extra.region);
 
   if (raw === "" || raw === "tonight" || raw === "today") {
     const feed = await listings({ when: "tonight", ...extra });
@@ -190,9 +201,9 @@ const tool = (name, config, handler) => TOOLS.push({ name, config, handler });
 tool(
   "scenef_whats_playing",
   {
-    title: "What's playing in SF",
+    title: "What's playing in California and Hawaii",
     description:
-      `Ranked list of films playing San Francisco theaters in a given window (tonight, tomorrow, the weekend, or a date), with optional genre and format filters. When the window covers tonight, opens with Notable tonight — scarcity facts with evidence (measured seat counts, final nights, lone prints, posted discounts, live elements); lead with those when asked what to see. Each entry carries year, runtime, genres, a one-line hook, venue count, the next showtime, and the film's SceneF url. ${DETAILED_CARRIES_ACCURACY}`,
+      `Ranked list of films playing California and Hawaii theaters in a given window (tonight, tomorrow, the weekend, or a date), with optional genre and format filters. When the window covers tonight, opens with Notable tonight — scarcity facts with evidence (measured seat counts, final nights, lone prints, posted discounts, live elements); lead with those when asked what to see. Each entry carries year, runtime, genres, a one-line hook, venue count, the next showtime, and the film's SceneF url. ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: {
       when: whenParam,
       genres: z.array(z.string()).optional().describe('Genre filters, e.g. ["horror", "comedy"].'),
@@ -208,14 +219,15 @@ tool(
         .optional()
         .describe("Max films to return (default 12, cap 25)."),
       response_format: responseFormat,
+      region: regionParam,
     },
     outputSchema: whatsPlayingOut.shape,
     annotations: READ_ONLY,
   },
   async (args) => {
     const detailed = isDetailed(args);
-    const tonight = await tonightNight();
-    const w = await windowFor(args.when);
+    const tonight = await tonightNight(args.region);
+    const w = await windowFor(args.when, args.region ? { region: args.region } : {});
     const venues = venueIndex(w.feed);
     const films = new Map(w.feed.films.map((f) => [f.key, f]));
 
@@ -275,7 +287,7 @@ tool(
 
     const L = [];
     if (w.warning) L.push(`Note: ${w.warning}`, "");
-    L.push(`What's playing in San Francisco — ${w.label}${w.nights.length === 1 ? `, ${nightLabel(w.nights[0])}` : ""}`);
+    L.push(`What's playing on the ${w.feed.region ?? "sf"} board — ${w.label}${w.nights.length === 1 ? `, ${nightLabel(w.nights[0])}` : ""}`);
     if (notable.length) {
       L.push("", "Notable tonight — scarcity facts, with evidence:");
       for (const n of notable.slice(0, 6)) {
@@ -340,13 +352,17 @@ tool(
           'Restrict to these theaters (ids or names), e.g. ["roxie", "Balboa"]. ' + "Required when `film` is omitted.",
         ),
       response_format: responseFormat,
+      region: regionParam,
     },
     outputSchema: searchOut.shape,
     annotations: READ_ONLY,
   },
   async (args) => {
     const detailed = isDetailed(args);
-    const feed = await listings(args.date ? { night: args.date } : {});
+    const feed = await listings({
+      ...(args.date ? { night: args.date } : {}),
+      ...(args.region ? { region: args.region } : {}),
+    });
     const venues = venueIndex(feed);
     const films = new Map(feed.films.map((f) => [f.key, f]));
     const base = baseOf(feed);
@@ -386,7 +402,7 @@ tool(
       if (!film) {
         const text = candidates.length
           ? `No single match for "${args.film}". Did you mean:\n${candidates.map((c) => `  • ${c.title}${c.year ? ` (${c.year})` : ""} — slug ${c.slug}`).join("\n")}`
-          : `"${args.film}" is not on the San Francisco board right now. Call scenef_whats_playing to see what is.`;
+          : `"${args.film}" is not on the ${feed.region ?? "current"} board right now. Call scenef_whats_playing to see what is.`;
         return both(text, {
           ...base,
           query: args.film,
@@ -463,24 +479,25 @@ tool(
   {
     title: "Theater info",
     description:
-      `One SF theater's card: address, neighborhood, website, ticketing note, structured discounts (label/detail/day), amenities, its next 5 showtimes with ticket links, and its calendar feed url. ${DETAILED_CARRIES_ACCURACY}`,
+      `One theater's card: address, neighborhood, website, ticketing note, structured discounts (label/detail/day), amenities, its next 5 showtimes with ticket links, and its calendar feed url. ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: {
       theater: z.string().describe('Theater id or name, e.g. "roxie" or "Balboa Theater".'),
       response_format: responseFormat,
+      region: regionParam,
     },
     outputSchema: theaterOut.shape,
     annotations: READ_ONLY,
   },
   async (args) => {
     const detailed = isDetailed(args);
-    const feed = await listings();
+    const feed = await listings(args.region ? { region: args.region } : {});
     const base = baseOf(feed);
     const { venue, candidates } = matchVenue(feed, args.theater);
 
     if (!venue) {
       const text = candidates.length
         ? `No single match for "${args.theater}". Did you mean:\n${candidates.map((c) => `  • ${c.name} — id ${c.id}`).join("\n")}`
-        : `"${args.theater}" is not a theater on the San Francisco board. Covered: ${feed.venues.map((v) => v.id).join(", ")}.`;
+        : `"${args.theater}" is not a theater on the ${feed.region ?? "current"} board. Covered: ${feed.venues.map((v) => v.id).join(", ")}.`;
       return both(text, {
         ...base,
         query: args.theater,
@@ -543,13 +560,14 @@ tool(
     inputSchema: {
       film: z.string().describe("Film title or SceneF slug."),
       response_format: responseFormat,
+      region: regionParam,
     },
     outputSchema: filmDetailsOut.shape,
     annotations: READ_ONLY,
   },
   async (args) => {
     const detailed = isDetailed(args);
-    const feed = await listings();
+    const feed = await listings(args.region ? { region: args.region } : {});
     const base = baseOf(feed);
     const { film, candidates } = matchFilm(feed, args.film);
 
@@ -572,7 +590,7 @@ tool(
       .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
     const nights = [...new Set(showtimes.map((s) => s.nightOf))].sort();
     const final_night = nights.length ? nights[nights.length - 1] : null;
-    const tonight = await tonightNight();
+    const tonight = await tonightNight(args.region);
 
     const card = filmShape(film, { full: true });
     const data = {
@@ -656,6 +674,7 @@ tool(
             "hard bounds.",
         ),
       response_format: responseFormat,
+      region: regionParam,
     },
     outputSchema: planOut.shape,
     annotations: READ_ONLY,
@@ -678,7 +697,7 @@ tool(
       discounts: p.discounts_only ? "only" : undefined,
     };
 
-    const w = await windowFor(args.when, profile);
+    const w = await windowFor(args.when, args.region ? { ...profile, region: args.region } : profile);
     const venues = venueIndex(w.feed);
     const films = new Map(w.feed.films.map((f) => [f.key, f]));
 
@@ -771,16 +790,16 @@ tool(
   {
     title: "Discount grid",
     description:
-      "Every structured discount across all SF theaters — venue, label, detail, and day-bound days — with the ones that apply today flagged.",
-    inputSchema: { response_format: responseFormat },
+      "Every structured discount across one board's theaters — venue, label, detail, and day-bound days — with the ones that apply today flagged.",
+    inputSchema: { response_format: responseFormat, region: regionParam },
     outputSchema: discountsOut.shape,
     annotations: READ_ONLY,
   },
   async (args) => {
     void args;
-    const feed = await listings();
+    const feed = await listings(args.region ? { region: args.region } : {});
     const base = baseOf(feed);
-    const tonight = await tonightNight();
+    const tonight = await tonightNight(args.region);
     const { dowOf, dayName } = await import("./shape.js");
     const today_dow = dowOf(tonight);
     const today_name = dayName(tonight);
@@ -807,7 +826,7 @@ tool(
 
     const data = { ...base, today_dow, today_name, applies_today_count, venues };
 
-    const L = [`Discounts across San Francisco theaters — ${applies_today_count} active today (${today_name})`];
+    const L = [`Theater discounts on this board — ${applies_today_count} active today (${today_name})`];
     for (const v of venues) {
       L.push("", `${v.name}${v.neighborhood ? ` · ${v.neighborhood}` : ""}`);
       for (const d of v.discounts) {
@@ -824,7 +843,7 @@ tool(
   {
     title: "Coming soon (on-sale radar)",
     description:
-      `Films whose first SF screening is more than 48 hours out, sorted by first night — the on-sale radar for runs worth booking early. Configurable horizon. ${DETAILED_CARRIES_ACCURACY}`,
+      `Films whose first screening on this board is more than 48 hours out, sorted by first night — the on-sale radar for runs worth booking early. Configurable horizon. ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: {
       horizon_days: z
         .number()
@@ -834,6 +853,7 @@ tool(
         .optional()
         .describe("How far ahead to look (default 21 days)."),
       response_format: responseFormat,
+      region: regionParam,
     },
     outputSchema: comingOut.shape,
     annotations: READ_ONLY,
@@ -841,7 +861,7 @@ tool(
   async (args) => {
     void args;
     const horizon_days = Math.min(Math.max(args.horizon_days ?? 21, 1), 90);
-    const feed = await listings();
+    const feed = await listings(args.region ? { region: args.region } : {});
     const base = baseOf(feed);
     const venues = venueIndex(feed);
     const films = new Map(feed.films.map((f) => [f.key, f]));
@@ -878,7 +898,7 @@ tool(
       films: rows.map((r) => ({ ...filmShape(r.film), first_night: r.first_night, opening_venues: r.opening_venues })),
     };
 
-    const L = [`Coming soon — ${rows.length} film${rows.length === 1 ? "" : "s"} whose first San Francisco screening is more than 48 hours out, within ${horizon_days} days.`];
+    const L = [`Coming soon — ${rows.length} film${rows.length === 1 ? "" : "s"} whose first screening on this board is more than 48 hours out, within ${horizon_days} days.`];
     if (!rows.length) L.push("", "Nothing that far ahead on the board yet — repertory calendars post close to the date.");
     // The prose is capped; the structured payload is not. A cap nobody is told
     // about reads as "that is all of them", which is the one thing it is not.
@@ -902,22 +922,22 @@ tool(
   {
     title: "Right now",
     description:
-      `The cheap is-anything-on call: how many screenings tonight, the next 5 curtains city-wide with venue/time/film, and dataset freshness per source. ${DETAILED_CARRIES_ACCURACY}`,
-    inputSchema: { response_format: responseFormat },
+      `The cheap is-anything-on call: how many screenings tonight, the next 5 curtains across this board with venue/time/film, and dataset freshness per source. ${DETAILED_CARRIES_ACCURACY}`,
+    inputSchema: { response_format: responseFormat, region: regionParam },
     outputSchema: nowOut.shape,
     annotations: READ_ONLY,
   },
   async (args) => {
     const detailed = isDetailed(args);
-    const tonight = await tonightNight();
-    const feed = await listings({ night: tonight });
+    const tonight = await tonightNight(args.region);
+    const feed = await listings(args.region ? { night: tonight, region: args.region } : { night: tonight });
     // STILL TO COME IS THE BOARD'S JUDGEMENT, NOT OUR CLOCK. A film that
     // started ten minutes ago is still worth walking to, and the site decides
     // where that line falls — `when=tonight` is its own answer to "what can
     // you still catch". Comparing startsAt to Date.now() here instead made
     // this tool report ten fewer showtimes than scenef_whats_playing reported
     // for the very same night, from the very same feed.
-    const catchable = await listings({ when: "tonight" });
+    const catchable = await listings(args.region ? { when: "tonight", region: args.region } : { when: "tonight" });
     const base = baseOf(feed);
     const venues = venueIndex(feed);
     const films = new Map(feed.films.map((f) => [f.key, f]));
@@ -958,14 +978,24 @@ tool(
     };
 
     const L = [
-      `San Francisco, ${nightLabel(tonight)} — ${all.length} screening${all.length === 1 ? "" : "s"} tonight, ${ahead.length} still to come.`,
+      `${nightLabel(tonight)} — ${all.length} screening${all.length === 1 ? "" : "s"} tonight, ${ahead.length} still to come.`,
       `Sources: ${healthy}/${latest.size} verified within 24 hours. Data as of ${base.data_as_of}.`,
     ];
-    L.push("", "Next curtains:");
+    L.push("", "Next curtains city-wide:");
     if (!ahead.length) L.push("  The night is over — nothing left to catch tonight.");
     for (const s of ahead.slice(0, 5)) {
       L.push(`  ${displayTime(s.startsAt)} ${venues.get(s.venueId)?.short ?? s.venueId} — ${films.get(s.filmKey)?.title ?? s.filmKey}`);
       L.push(`    ${s.ticketUrl}${detailed ? `  (${s.confidence ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
+    }
+    // The instructions promise this tool names the boards. The list comes
+    // from the feed's own 400-discovery (see boardsList); when that parse
+    // fails the pointer is honest instead of the list being invented.
+    L.push("", `This board: ${feed.region ?? "sf"} · ${feed.timezone ?? "America/Los_Angeles"}.`);
+    const boards = await boardsList();
+    if (boards?.length) {
+      L.push(`Pass region= to any tool to read another. ${boards.length} boards:`, boards.join(", "));
+    } else {
+      L.push("Pass region= to any tool to read another board; the current set is listed at https://scenef.com/llms.txt.");
     }
     L.push("", `${base.attribution} · ${ACCURACY_CONTRACT}`);
     return both(L.join("\n"), data);
@@ -977,13 +1007,13 @@ tool(
   {
     title: "The accuracy record",
     description: `${ACCURACY_CONTRACT} This tool returns that record: the site-wide confidence mix, the counts of verification checks confirmed / missing / unreachable over the record's window (window_days in the payload — 30 days at present) with the pass rate and the exact denominator it was computed from, the same per venue with source tier and last-verified time, and the definitions of every level. Checks that could not run — a bot wall, a client-rendered page — are graded unreachable and excluded from the pass rate rather than counted as passes. Quote these numbers directly; they are recomputed on every call.`,
-    inputSchema: { response_format: responseFormat },
+    inputSchema: { response_format: responseFormat, region: regionParam },
     outputSchema: accuracyOutput.shape,
     annotations: READ_ONLY,
   },
   async (args) => {
     const detailed = isDetailed(args);
-    const payload = await accuracyRecord();
+    const payload = await accuracyRecord(args.region);
     const s = payload.site;
 
     const L = [

@@ -41,7 +41,13 @@ await client.connect(new StdioClientTransport({ command: process.execPath, args:
 console.log("handshake");
 const info = client.getServerVersion();
 check(info?.name === "scenef", "server name is scenef", info?.name);
-check(info?.version === "1.0.0", "version is 1.0.0", info?.version);
+// The version the server announces is package.json's, read rather than
+// repeated: a pinned copy here failed the day the version bumped, reporting
+// a defect in a release that was working.
+const pkgVersion = JSON.parse(
+  await import("node:fs/promises").then((fs) => fs.readFile(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8")),
+).version;
+check(info?.version === pkgVersion, `version matches package.json (${pkgVersion})`, info?.version);
 check(
   (client.getInstructions() ?? "").includes("Accuracy is computed, not claimed"),
   "initialize carries the accuracy contract",
