@@ -1014,6 +1014,19 @@ tool(
   async (args) => {
     const detailed = isDetailed(args);
     const payload = await accuracyRecord(args.region);
+    // The API's record, picked to the advertised schema rather than passed
+    // verbatim: the feed grew a `scope` field (2026-09-08) and verbatim
+    // passthrough turned that growth into a validation crash for every
+    // client. An explicit pick means the API can evolve without breaking
+    // the contract this tool advertises.
+    const record = {
+      data_as_of: payload.data_as_of,
+      attribution: payload.attribution,
+      site: payload.site,
+      venues: payload.venues,
+      method: payload.method,
+      docs: payload.docs,
+    };
     const s = payload.site;
 
     const L = [
@@ -1039,6 +1052,6 @@ tool(
       L.push("", `Rings: ${payload.method.rings.join(" · ")}`);
     }
     L.push("", `Full record: ${payload.docs}`);
-    return both(L.join("\n"), payload);
+    return both(L.join("\n"), record);
   },
 );
