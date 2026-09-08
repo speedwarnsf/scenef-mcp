@@ -45,7 +45,7 @@ const responseFormat = z
   .enum(["concise", "detailed"])
   .optional()
   .describe(
-    'Output size: "concise" (default) for tight text lines, "detailed" to add ids, per-showtime ticket urls, and extra metadata.',
+    'Output size. "concise" (default) is tight text plus a structured summary — on list-shaped tools each film carries showtime_count and next_showtime, but NOT the full showtimes array. "detailed" adds the per-showtime rows with ids, ticket urls, and accuracy metadata. Concise measures ~10KB where detailed measures ~69KB, so ask for detailed when you need the rows and scenef_search_showtimes when you need them for one film or theatre.',
   );
 
 const whenParam = z
@@ -93,7 +93,7 @@ export const ACCURACY_CONTRACT =
   "Accuracy is computed, not claimed: every showtime carries a confidence level, a source tier, and a last-verified time, and the running record of our own verification checks — failures included — is public at https://scenef.com/api/accuracy.";
 
 const DETAILED_CARRIES_ACCURACY =
-  'In "detailed" mode every showtime also carries its confidence level, source tier, reporting sources, and verified_at timestamp.';
+  '"detailed" adds the full showtimes array, each row carrying its confidence level, source tier, reporting sources and verified_at timestamp; "concise" gives showtime_count and next_showtime instead.';
 
 const isDetailed = (args) => args?.response_format === "detailed";
 
@@ -203,7 +203,7 @@ tool(
   {
     title: "What's playing in California and Hawaii",
     description:
-      `Ranked list of films playing California and Hawaii theaters in a given window (tonight, tomorrow, the weekend, or a date), with optional genre and format filters. When the window covers tonight, opens with Notable tonight — scarcity facts with evidence (measured seat counts, final nights, lone prints, posted discounts, live elements); lead with those when asked what to see. Each entry carries year, runtime, genres, a one-line hook, venue count, the next showtime, and the film's SceneF url. ${DETAILED_CARRIES_ACCURACY}`,
+      `Ranked list of films playing California and Hawaii theaters in a given window (tonight, tomorrow, the weekend, or a date), with optional genre and format filters. When the window covers tonight, opens with Notable tonight — scarcity facts with evidence (measured seat counts, final nights, lone prints, posted discounts, live elements); lead with those when asked what to see. Each entry carries year, runtime, genres, a one-line hook, venue count, showtime_count, the next showtime, and the film's SceneF url. The full per-showtime rows are in "detailed", or from scenef_search_showtimes scoped to one film or theatre. ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: {
       when: whenParam,
       genres: z.array(z.string()).optional().describe('Genre filters, e.g. ["horror", "comedy"].'),
@@ -281,7 +281,12 @@ tool(
       films: chosen.map((e) => ({
         ...filmShape(e.film),
         venue_count: e.venue_count,
-        showtimes: e.showtimes.map((s) => screeningShape(s, venues, { detailed })),
+        showtime_count: e.showtimes.length,
+        next_showtime: screeningShape(e.showtimes[0], venues, { detailed: false }),
+        // The rows themselves only in detailed — the 2026-09-08 wire ruling.
+        // Concise keeps the count and the next curtain; search_showtimes is
+        // the tool for full rows scoped to one film or theatre.
+        ...(detailed ? { showtimes: e.showtimes.map((s) => screeningShape(s, venues, { detailed })) } : {}),
       })),
     };
 

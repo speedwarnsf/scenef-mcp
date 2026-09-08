@@ -62,7 +62,17 @@ export const whatsPlayingOut = z.object({
   note: z.string().nullable(),
   notable: z.array(loose({ title: z.string(), venue: z.string(), local_time: z.string() })),
   film_count: z.number(),
-  films: z.array(filmOut.extend({ venue_count: z.number(), showtimes: z.array(screeningOut) })),
+  // showtimes is OPTIONAL, not absent: concise omits the array (2026-09-08
+  // wire ruling, −85%) while showtime_count stays required in both modes —
+  // an absent array with no count would be indistinguishable from a film
+  // with no showtimes, the "nothing there vs could not look" law again.
+  films: z.array(
+    filmOut.extend({
+      venue_count: z.number(),
+      showtime_count: z.number(),
+      showtimes: z.array(screeningOut).optional(),
+    }),
+  ),
 });
 
 export const searchOut = z.object({
