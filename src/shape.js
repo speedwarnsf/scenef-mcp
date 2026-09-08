@@ -45,6 +45,12 @@ export function baseOf(feed) {
     data_as_of: feed.data_as_of ?? feed.generated,
     attribution: feed.attribution ?? "Showtimes via SceneF.com",
     accuracy_url: feed.accuracy ?? `${SITE}/api/accuracy`,
+    // Board identity, from the feed (2026-09-08): the answer names which
+    // board it read, in the reader's own words. region_name ships with
+    // region or not at all — there is no handle without its label.
+    region: feed.region ?? "sf",
+    region_name: feed.region_name ?? feed.region ?? "sf",
+    timezone: feed.timezone ?? "America/Los_Angeles",
   };
 }
 

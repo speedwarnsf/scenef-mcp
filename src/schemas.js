@@ -22,6 +22,9 @@ const baseOut = {
   data_as_of: z.string(),
   attribution: z.string(),
   accuracy_url: z.string(),
+  region: z.string(),
+  region_name: z.string(),
+  timezone: z.string(),
 };
 
 export const venueOut = loose({
@@ -169,6 +172,9 @@ export const nowOut = z.object({
   still_to_come: z.number(),
   next_curtains: z.array(screeningOut.extend({ film: filmOut.nullable() })),
   sources: loose({ healthy: z.number(), total: z.number() }),
+  boards: z.array(
+    z.object({ region: z.string(), name: z.string(), timezone: z.string() }),
+  ),
 });
 
 /** The published shape of the accuracy record. Loose where the record may

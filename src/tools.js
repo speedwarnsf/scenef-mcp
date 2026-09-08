@@ -960,8 +960,10 @@ tool(
     }
     const healthy = [...latest.values()].filter((at) => now - new Date(at).getTime() < 86_400_000).length;
 
+    const boards = await boardsList();
     const data = {
       ...base,
+      boards: boards ?? [],
       night_of: tonight,
       is_tonight: true,
       screenings_tonight: all.length,
@@ -987,15 +989,17 @@ tool(
       L.push(`  ${displayTime(s.startsAt)} ${venues.get(s.venueId)?.short ?? s.venueId} — ${films.get(s.filmKey)?.title ?? s.filmKey}`);
       L.push(`    ${s.ticketUrl}${detailed ? `  (${s.confidence ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
     }
-    // The instructions promise this tool names the boards. The list comes
-    // from the feed's own 400-discovery (see boardsList); when that parse
-    // fails the pointer is honest instead of the list being invented.
-    L.push("", `This board: ${feed.region ?? "sf"} · ${feed.timezone ?? "America/Los_Angeles"}.`);
-    const boards = await boardsList();
+    // The instructions promise this tool names the boards — each id with the
+    // place it names, from /api/boards (see boardsList). When the roster is
+    // unavailable the pointer is honest instead of the list being invented.
+    L.push("", `This board: ${base.region_name} (${base.region}) · ${base.timezone}.`);
     if (boards?.length) {
-      L.push(`Pass region= to any tool to read another. ${boards.length} boards:`, boards.join(", "));
+      L.push(
+        `Pass region= to any tool to read another. ${boards.length} boards:`,
+        boards.map((b) => `${b.region} — ${b.name} [${b.timezone}]`).join(", "),
+      );
     } else {
-      L.push("Pass region= to any tool to read another board; the current set is listed at https://scenef.com/llms.txt.");
+      L.push("Pass region= to any tool to read another board; the current set is listed at https://scenef.com/api/boards.");
     }
     L.push("", `${base.attribution} · ${ACCURACY_CONTRACT}`);
     return both(L.join("\n"), data);

@@ -82,13 +82,15 @@ export function accuracyRecord(region) {
 
 // ————————————————————————————————————————————————————— board discovery
 //
-// The REST contract has no /api/regions. It has something better documented:
-// an unknown ?region= answers 400 naming the complete valid list, and
-// llms.txt blesses exactly that 400 as "how to discover the set rather than
-// assuming a fixed one." So this asks a question it knows is wrong and reads
-// the correction. Cached for an hour — boards change on deploys, not minutes.
-// Any failure to parse returns null and the caller says where the list lives
-// instead of inventing one.
+// /api/boards (added 2026-09-08) is the roster: every LIT board with its
+// slug, display name, and timezone. It replaced this function's original
+// 400-discovery trick (ask for a region that doesn't exist, read the valid
+// list out of the correction). Cached for an hour — boards change on flips,
+// not minutes. Each entry is picked to {region, name, timezone}, the shape
+// scenef_now's output schema advertises; the endpoint's count field is
+// checked against the array so a truncated listing is caught, not served
+// (three listings in this estate have hidden one). Any failure returns null
+// and the caller says where the list lives instead of inventing one.
 
 let boardsCache = { at: 0, value: null };
 const BOARDS_TTL_MS = 3_600_000;
@@ -96,16 +98,18 @@ const BOARDS_TTL_MS = 3_600_000;
 export async function boardsList() {
   if (boardsCache.value && Date.now() - boardsCache.at < BOARDS_TTL_MS) return boardsCache.value;
   try {
-    await listings({ region: "__boards__" });
-  } catch (err) {
-    const m = /Valid:\s*([a-z0-9,\-\s]+)/i.exec(String(err?.message ?? ""));
-    if (m) {
-      const value = m[1].split(",").map((s) => s.trim()).filter(Boolean);
-      if (value.length) {
-        boardsCache = { at: Date.now(), value };
-        return value;
-      }
+    const d = await getJson("/api/boards");
+    const raw = Array.isArray(d?.boards) ? d.boards : [];
+    if (typeof d?.count === "number" && d.count !== raw.length) return null;
+    const value = raw
+      .filter((b) => b && b.region && b.name && b.timezone)
+      .map((b) => ({ region: b.region, name: b.name, timezone: b.timezone }));
+    if (value.length) {
+      boardsCache = { at: Date.now(), value };
+      return value;
     }
+  } catch {
+    /* fall through to null — the caller points at the list, never invents it */
   }
   return null;
 }

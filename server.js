@@ -21,7 +21,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ACCURACY_CONTRACT, TOOLS } from "./src/tools.js";
 
 export const SERVER_NAME = "scenef";
-export const SERVER_VERSION = "1.1.1";
+export const SERVER_VERSION = "1.2.0";
 
 /** What the server tells a client at initialize — the hosted server's words. */
 export const INSTRUCTIONS = [

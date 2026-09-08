@@ -1,6 +1,6 @@
 {
   "name": "scenef-mcp",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Movie showtimes across California and Hawaii over MCP — 33 regional boards, chains, indies, and repertory houses, verified against each theater's own calendar. Local stdio server, read-only, no API key.",
   "license": "MIT",
   "type": "module",
