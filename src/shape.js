@@ -39,11 +39,18 @@ export function nightLabel(night) {
   return `${dayName(night)}, ${MONTHS[m - 1]} ${d}`;
 }
 
+/** The hosted server's structuredBase attribution, hardcoded there and so
+ *  hardcoded here. The feed's own `attribution` field says "Showtimes via
+ *  SceneF.com" — that is the TEXT footer's phrase (see footer below), and
+ *  passing it through put a different string in the JSON than the hosted
+ *  server puts in the same field. */
+export const ATTRIBUTION = "SceneF — https://scenef.com";
+
 /** Provenance every structured payload carries. */
 export function baseOf(feed) {
   return {
     data_as_of: feed.data_as_of ?? feed.generated,
-    attribution: feed.attribution ?? "Showtimes via SceneF.com",
+    attribution: ATTRIBUTION,
     accuracy_url: feed.accuracy ?? `${SITE}/api/accuracy`,
     // Board identity, from the feed (2026-09-08): the answer names which
     // board it read, in the reader's own words. region_name ships with
@@ -185,6 +192,66 @@ export function weekendNights(night) {
   const toFriday = dow === 0 ? -2 : 5 - dow;
   const friday = shiftDate(night, toFriday);
   return [friday, shiftDate(friday, 1), shiftDate(friday, 2)];
+}
+
+// ————————————————————————————————————————————— the hosted server's prose
+//
+// These are the words the hosted server answers with, copied so a caller
+// reading a miss from either transport reads the same sentence. Each one
+// names its source in the hosted tree (src/lib/mcp/tools.ts).
+
+/** The provenance footer every hosted answer ends with — `footer()` there,
+ *  appended by `finish()` after one blank line. Two tools are the exceptions
+ *  and are mirrored per tool: scenef_resolve_board carries no footer (it
+ *  reads no board), and scenef_accuracy ends with its own two-line tail.
+ *  The freshness is the feed's data_as_of, which is the hosted dataset's
+ *  generatedAt; the record url is the feed's own. */
+export function footer(base) {
+  return `— Showtimes via SceneF.com, data as of ${base.data_as_of} · accuracy record: ${base.accuracy_url}`;
+}
+
+/** Hosted `finish()`: the lines, a blank, the footer. Trailing blanks are
+ *  dropped first so the tail is always exactly "\n\n— Showtimes via …" —
+ *  the hosted renderers pop them before finishing where they can occur. */
+export function finish(base, lines) {
+  const body = [...lines];
+  while (body.length && body[body.length - 1] === "") body.pop();
+  return [...body, "", footer(base)].join("\n");
+}
+
+/** Hosted `filmCandidatesText()`: one function renders the film miss for
+ *  BOTH scenef_search_showtimes and scenef_film_details — a miss, or an
+ *  ambiguity with the candidates and their film pages. The board is named
+ *  by its region_name, from the feed. */
+export function filmCandidatesText(base, query, candidates) {
+  if (!candidates.length) {
+    return [
+      `No film matching "${query}" in the current ${base.region_name} listings.`,
+      `Try scenef_whats_playing to browse what's on.`,
+    ];
+  }
+  return [
+    `"${query}" is ambiguous — did you mean:`,
+    ...candidates.map((f) => `- ${f.title}${f.year ? ` (${f.year})` : ""} — ${f.slug} · ${SITE}/film/${f.slug}`),
+    `Call again with the exact slug.`,
+  ];
+}
+
+/** Hosted `theaterInfo()` miss: no theater, and every id on the board —
+ *  the whole list, joined with ", ", never truncated. An ambiguous name
+ *  lists the candidates by name and id. */
+export function theaterCandidatesText(query, candidates, venues) {
+  if (!candidates.length) {
+    return [
+      `No theater on this board matching "${query}".`,
+      `Known: ${venues.map((v) => v.id).join(", ")}.`,
+    ];
+  }
+  return [
+    `"${query}" is ambiguous — did you mean:`,
+    ...candidates.map((v) => `- ${v.name} (${v.id})`),
+    `Call again with the id.`,
+  ];
 }
 
 /** Text helpers — every tool renders the same answer twice, once for a
