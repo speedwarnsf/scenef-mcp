@@ -578,9 +578,13 @@ tool(
     const { film, candidates } = matchFilm(feed, args.film);
 
     if (!film) {
+      // The miss names the board it looked at, in the hosted server's words.
+      // This said "the San Francisco board" for every region while its own
+      // structuredContent said la-central — a caller reading the prose was
+      // told the wrong city had been searched.
       const text = candidates.length
         ? `No single match for "${args.film}". Did you mean:\n${candidates.map((c) => `  • ${c.title}${c.year ? ` (${c.year})` : ""} — slug ${c.slug}`).join("\n")}`
-        : `"${args.film}" is not on the San Francisco board right now. Call scenef_whats_playing to see what is.`;
+        : `No film matching "${args.film}" in the current ${base.region_name} listings.\nTry scenef_whats_playing to browse what's on.`;
       return both(text, {
         ...base,
         query: args.film,
@@ -996,28 +1000,61 @@ tool(
   },
   async (args) => {
     const detailed = isDetailed(args);
-    const tonight = await tonightNight(args.region);
-    const feed = await listings(args.region ? { night: tonight, region: args.region } : { night: tonight });
-    // STILL TO COME IS THE BOARD'S JUDGEMENT, NOT OUR CLOCK. A film that
-    // started ten minutes ago is still worth walking to, and the site decides
-    // where that line falls — `when=tonight` is its own answer to "what can
-    // you still catch". Comparing startsAt to Date.now() here instead made
-    // this tool report ten fewer showtimes than scenef_whats_playing reported
-    // for the very same night, from the very same feed.
-    const catchable = await listings(args.region ? { when: "tonight", region: args.region } : { when: "tonight" });
-    const base = baseOf(feed);
-    const venues = venueIndex(feed);
-    const films = new Map(feed.films.map((f) => [f.key, f]));
+    const extra = args.region ? { region: args.region } : {};
 
+    // THE HOSTED RULE, EXACTLY — three numbers from two sets.
+    //
+    //   screenings_tonight  the board's OWN tonight slice. `when=tonight` is
+    //                       the site's tonight(d).screenings: the live night
+    //                       in the board's timezone, a show kept while it is
+    //                       still inside the site's catchable grace.
+    //   still_to_come       that slice minus anything whose curtain has gone
+    //                       up: Date.parse(startsAt) >= Date.now(). startsAt
+    //                       carries the venue's own offset, so the instant it
+    //                       names is the theatre's wall clock — Honolulu's on
+    //                       the Oahu board — never this process's.
+    //   next_curtains       the WHOLE board through the same filter, soonest
+    //                       first, five of them. A spent evening therefore
+    //                       rolls into tomorrow's matinees, and each one says
+    //                       which night it belongs to.
+    //
+    // The version before this drew next_curtains from the tonight slice
+    // UNFILTERED and counted the same slice as still_to_come, on the theory
+    // that the site had already decided what was catchable. It had decided
+    // what to KEEP; the hosted server still asks the clock. So a 3:25 PM show
+    // led "next curtains" at 3:41 PM, and still_to_come disagreed with the
+    // hosted answer for the same board and the same minute. scenef_whats_playing
+    // reporting MORE showtimes for tonight than this tool says are still to
+    // come is correct: that list is the slice, this number is the clock.
+    const [feed, board] = await Promise.all([listings({ when: "tonight", ...extra }), listings(extra)]);
     const now = Date.now();
-    const all = feed.screenings.filter((s) => s.nightOf === tonight);
-    const ahead = [...catchable.screenings].sort((a, b) => a.startsAt.localeCompare(b.startsAt));
+    const notStarted = (s) => Date.parse(s.startsAt) >= now;
 
-    // Freshness per source, computed from the board itself: a source is healthy
+    // Which night the board is calling tonight, and whether it is: the feed
+    // labels its own roll-forward (tonight_is, 2026-09-05), so a dark or spent
+    // evening is reported as the next lit night rather than as an empty
+    // tonight. Older payloads without the label fall back to the night the
+    // slice's screenings sit on.
+    const tonightIs = feed.tonight_is && typeof feed.tonight_is === "object" ? feed.tonight_is : null;
+    const tonight = tonightIs?.night ?? (await tonightNight(args.region));
+    const is_tonight = tonightIs ? tonightIs.label === "tonight" : true;
+
+    const base = baseOf(feed);
+    const venues = venueIndex(board);
+    const films = new Map(board.films.map((f) => [f.key, f]));
+
+    const all = feed.screenings;
+    const stillToCome = all.filter(notStarted);
+    const next = board.screenings
+      .filter(notStarted)
+      .sort((a, b) => a.startsAt.localeCompare(b.startsAt))
+      .slice(0, 5);
+
+    // Freshness per source, computed from the whole board: a source is healthy
     // when its most recent verification landed within the last 24 hours. Stated
     // rather than assumed — `basis` says exactly what the number means.
     const latest = new Map();
-    for (const s of feed.screenings) {
+    for (const s of board.screenings) {
       for (const src of s.sources ?? [s.provenance?.source].filter(Boolean)) {
         const at = s.verified_at ?? s.provenance?.lastVerifiedAt ?? null;
         if (!at) continue;
@@ -1032,10 +1069,10 @@ tool(
       ...base,
       boards: boards ?? [],
       night_of: tonight,
-      is_tonight: true,
+      is_tonight,
       screenings_tonight: all.length,
-      still_to_come: ahead.length,
-      next_curtains: ahead.slice(0, 5).map((s) => ({
+      still_to_come: stillToCome.length,
+      next_curtains: next.map((s) => ({
         ...screeningShape(s, venues, { detailed }),
         film: filmShape(films.get(s.filmKey)),
       })),
@@ -1047,13 +1084,17 @@ tool(
     };
 
     const L = [
-      `${nightLabel(tonight)} — ${all.length} screening${all.length === 1 ? "" : "s"} tonight, ${ahead.length} still to come.`,
+      is_tonight
+        ? `${nightLabel(tonight)} — ${all.length} screening${all.length === 1 ? "" : "s"} tonight, ${stillToCome.length} still to come.`
+        : `${nightLabel(tonight)} (the next lit night) — ${all.length} screening${all.length === 1 ? "" : "s"}.`,
       `Sources: ${healthy}/${latest.size} verified within 24 hours. Data as of ${base.data_as_of}.`,
     ];
     L.push("", "Next curtains city-wide:");
-    if (!ahead.length) L.push("  The night is over — nothing left to catch tonight.");
-    for (const s of ahead.slice(0, 5)) {
-      L.push(`  ${displayTime(s.startsAt)} ${venues.get(s.venueId)?.short ?? s.venueId} — ${films.get(s.filmKey)?.title ?? s.filmKey}`);
+    if (!next.length) L.push("  No upcoming curtains on the books.");
+    for (const s of next) {
+      L.push(
+        `  ${displayTime(s.startsAt)}${s.nightOf !== tonight ? ` (${nightLabel(s.nightOf)})` : ""} ${venues.get(s.venueId)?.short ?? s.venueId} — ${films.get(s.filmKey)?.title ?? s.filmKey}`,
+      );
       L.push(`    ${s.ticketUrl}${detailed ? `  (${s.confidence ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
     }
     // The instructions promise this tool names the boards — each id with the
