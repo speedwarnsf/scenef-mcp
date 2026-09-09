@@ -14,7 +14,7 @@
 // contract at https://scenef.com/agents. Both answer from the same numbers.
 
 import { z } from "zod";
-import { SITE, accuracyRecord, boardsList, listings, shiftDate, tonightNight } from "./feed.js";
+import { SITE, accuracyRecord, boardsList, listings, resolvePlace, shiftDate, tonightNight } from "./feed.js";
 import {
   baseOf,
   both,
@@ -35,6 +35,7 @@ import {
   discountsOut,
   filmDetailsOut,
   nowOut,
+  placeOut,
   planOut,
   searchOut,
   theaterOut,
@@ -919,6 +920,67 @@ tool(
     }
     L.push("", `${base.attribution} · data as of ${base.data_as_of}`);
     return both(L.join("\n"), data);
+  },
+);
+
+// ——— scenef_resolve_board — THE TRANSLATION AN AGENT WAS DOING BY GUESS ———
+//
+// Every other tool takes `region`, our handle. A person says "Pasadena" or
+// "94121", and until now the agent had to map that to a handle itself —
+// which means guessing, and a wrong guess returns another city's showtimes
+// with a 200. This does the translation from a table built out of the
+// venue and census data, and REFUSES in three distinguishable ways rather
+// than picking.
+//
+// It does not break the explicit-region law. That law forbids inferring a
+// region from where the CALLER is; this reads a place the caller stated
+// and echoes back what it matched, so the same input always gives the same
+// board and the reasoning is visible rather than trusted.
+//
+// The table lives on the site. This server reads it through the public
+// door (/api/boards?place=, see feed.js) and picks the answer to the shape
+// advertised below — the accuracy lesson, again: a verbatim passthrough
+// turns the door's next field into a validation crash in every client.
+tool(
+  "scenef_resolve_board",
+  {
+    title: "Which board covers this place",
+    description:
+      "Translate a city, 5-digit ZIP, neighborhood or board alias into the region handle every other tool takes. Returns the board and WHAT matched it. Refuses rather than guessing: an ambiguous name returns candidates (Gainesville is a town in Texas and another in Florida), a place we cover but have not published returns outside_coverage with the nearest published boards, and an unknown string returns unknown with no fallback board. Coordinates are not accepted — this reads names, not locations.",
+    inputSchema: {
+      place: z
+        .string()
+        .describe('A city ("Pasadena"), a 5-digit ZIP ("94121"), a neighborhood ("the Mission") or a board alias ("the East Bay", "sf").'),
+    },
+    outputSchema: placeOut.shape,
+    annotations: READ_ONLY,
+  },
+  async (args) => {
+    const r = await resolvePlace(args.place);
+    const data = {
+      ok: r.ok,
+      input: typeof r.input === "string" ? r.input : String(args.place ?? "").trim(),
+      ...(r.matched ? { matched: r.matched } : {}),
+      ...(r.region ? { region: r.region } : {}),
+      ...(r.region_name ? { region_name: r.region_name } : {}),
+      ...(r.reason ? { reason: r.reason } : {}),
+      ...(Array.isArray(r.candidates)
+        ? { candidates: r.candidates.map((c) => ({ region: c.region, region_name: c.region_name, why: c.why })) }
+        : {}),
+      ...(Array.isArray(r.nearest_lit)
+        ? { nearest_lit: r.nearest_lit.map((n) => ({ region: n.region, region_name: n.region_name, miles: n.miles })) }
+        : {}),
+      ...(typeof r.note === "string" ? { note: r.note } : {}),
+    };
+    // The hosted server's line, word for word.
+    const line = data.ok
+      ? `${data.input} is on the ${data.region_name} board (region=${data.region}), matched by ${data.matched}.`
+      : data.reason === "ambiguous"
+        ? `"${data.input}" names more than one board: ${(data.candidates ?? []).map((c) => `${c.region} (${c.region_name})`).join(", ")}. Ask which, rather than choosing.`
+        : data.reason === "outside_coverage"
+          ? `${data.note ?? ""}${(data.nearest_lit ?? []).length ? ` Nearest published: ${(data.nearest_lit ?? []).map((n) => `${n.region_name} (${n.miles}mi)`).join(", ")}.` : ""}`
+          : `I do not know "${data.input}". Call scenef_now for the boards I do publish.`;
+    return both(line, data);
   },
 );
 

@@ -221,3 +221,21 @@ export const accuracyOutput = z.object({
   }),
   docs: z.string(),
 });
+
+/** ——— scenef_resolve_board ———
+ *  Four shapes in one object, and the discriminator is `ok`. Everything past
+ *  it is optional because a refusal carries different evidence than a hit:
+ *  candidates for an ambiguity, nearest_lit and a note for a place we cover
+ *  and have not published. A schema that required them all would force empty
+ *  arrays into answers that have nothing to say. */
+export const placeOut = z.object({
+  ok: z.boolean(),
+  input: z.string(),
+  matched: z.enum(["city", "zip", "neighborhood", "alias"]).optional(),
+  region: z.string().optional(),
+  region_name: z.string().optional(),
+  reason: z.enum(["ambiguous", "outside_coverage", "unknown"]).optional(),
+  candidates: z.array(z.object({ region: z.string(), region_name: z.string(), why: z.string() })).optional(),
+  nearest_lit: z.array(z.object({ region: z.string(), region_name: z.string(), miles: z.number() })).optional(),
+  note: z.string().optional(),
+});

@@ -1,5 +1,5 @@
 // The contract test: spawn the server exactly as a client would, over stdio,
-// and call all nine tools against the live board.
+// and call all ten tools against the live board.
 //
 // This is the test that matters. Declaring an outputSchema the payload fails
 // is worse than declaring none — the tool breaks at call time, in the
@@ -25,6 +25,7 @@ const EXPECTED = [
   "scenef_plan_movie_night",
   "scenef_discounts",
   "scenef_coming_soon",
+  "scenef_resolve_board",
   "scenef_now",
   "scenef_accuracy",
 ];
@@ -55,7 +56,7 @@ check(
 
 console.log("\ntools/list");
 const { tools } = await client.listTools();
-check(tools.length === 9, "nine tools", String(tools.length));
+check(tools.length === 10, "ten tools", String(tools.length));
 for (const name of EXPECTED) {
   const t = tools.find((x) => x.name === name);
   check(Boolean(t), `${name} present`);
@@ -76,6 +77,7 @@ const CALLS = [
   ["scenef_coming_soon", { horizon_days: 30 }],
   ["scenef_accuracy", {}],
   ["scenef_plan_movie_night", { when: "tonight", party_size: 2, preferences: { likes: ["horror", "comedy"], window: "evening" } }],
+  ["scenef_resolve_board", { place: "94121" }],
 ];
 
 for (const [name, args] of CALLS) {
@@ -112,6 +114,12 @@ const badVenue = await client.callTool({ name: "scenef_search_showtimes", argume
 check(!badVenue.isError && Array.isArray(badVenue.structuredContent?.unknown_venues), "an unknown theater is reported, not dropped");
 const badWhen = await client.callTool({ name: "scenef_whats_playing", arguments: { when: "someday", max_results: 1 } });
 check(typeof badWhen.structuredContent?.note === "string" && badWhen.structuredContent.note.includes("Unrecognized"), "an unusable when is reported, never silently swallowed");
+// A place, resolved through the public door — and a place nobody covers is a
+// refusal with a named reason, never a fallback board and never an error.
+const zip = await client.callTool({ name: "scenef_resolve_board", arguments: { place: "94121" } });
+check(!zip.isError && zip.structuredContent?.ok === true && typeof zip.structuredContent?.region === "string", "scenef_resolve_board resolves a ZIP to a board", zip.isError ? (zip.content?.[0]?.text ?? "").slice(0, 200) : "");
+const noPlace = await client.callTool({ name: "scenef_resolve_board", arguments: { place: "purple monkey dishwasher" } });
+check(!noPlace.isError && noPlace.structuredContent?.ok === false && noPlace.structuredContent?.reason === "unknown", "a place nobody covers is a refusal that says unknown, not an error");
 
 // THE WAY IT IS ACTUALLY INSTALLED. npm and npx put the bin in
 // node_modules/.bin as a symlink, so argv[1] is the link and import.meta.url
@@ -127,7 +135,7 @@ try {
   const viaLink = new Client({ name: "scenef-contract-test", version: "1.0.0" });
   await viaLink.connect(new StdioClientTransport({ command: process.execPath, args: [link] }));
   const linked = await viaLink.listTools();
-  check(linked.tools.length === 9, "a symlinked launch serves all nine tools", String(linked.tools.length));
+  check(linked.tools.length === 10, "a symlinked launch serves all ten tools", String(linked.tools.length));
   await viaLink.close();
 } catch (err) {
   check(false, "a symlinked launch starts at all", err?.message ?? String(err));

@@ -8,6 +8,8 @@
 //                       notable-tonight) — sliced by ?when= ?night= ?venue=
 //                       ?film=, ranked by the bring-your-own-profile grammar
 //   GET /api/accuracy   the verification record, failures included
+//   GET /api/boards     the roster of lit boards; ?place= resolves a city,
+//                       ZIP, neighborhood or alias to one of them, or refuses
 //
 // Every answer this server gives is computed in THIS process from that feed.
 // Read-only by construction: nothing here issues anything but a GET, and no
@@ -112,6 +114,29 @@ export async function boardsList() {
     /* fall through to null — the caller points at the list, never invents it */
   }
   return null;
+}
+
+// ————————————————————————————————————————————— a place, resolved to a board
+//
+// /api/boards?place= is the REST door behind the hosted scenef_resolve_board:
+// the same resolvePlace() answers both, from the table built out of the venue
+// and census data. This server reads the door rather than carrying a second
+// copy of that table — a copy would be right until the first region flipped,
+// and then it would hand a caller another city's showtimes with a 200.
+//
+// A refusal is a 200 with ok:false, never an error: the question was well
+// formed and the answer — ambiguous, outside_coverage, unknown — is real.
+// getJson passes a genuine failure (unreachable, 5xx) through as one.
+
+export async function resolvePlace(place) {
+  const d = await getJson(`/api/boards?place=${encodeURIComponent(String(place ?? ""))}`);
+  const r = d?.resolved;
+  if (!r || typeof r !== "object" || typeof r.ok !== "boolean") {
+    throw new Error(
+      `SceneF /api/boards?place= answered without a resolution. This server resolves places through that door and keeps no place table of its own.`,
+    );
+  }
+  return r;
 }
 
 // ——————————————————————————————————————————————— the night, not the date
