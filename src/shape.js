@@ -95,7 +95,27 @@ export function venueCard(v) {
   };
 }
 
-export function filmShape(f, { full = false } = {}) {
+/**
+ * A FILM PAGE IS REGION-SCOPED — the hosted filmUrl(slug, regionSlug) over
+ * regionHref() (src/lib/region-path.ts). The bare path serves the default
+ * board, so a film url handed to a caller reading Central Los Angeles must
+ * hang the board off the film: /film/{slug}/la-central. This server printed
+ * the bare path from every board and sent a Maui reader to San Francisco's
+ * showtimes, or to a 404 when the film does not play there.
+ *
+ * `region` is the feed's own region id. The hosted server maps the id
+ * through its region table to a slug; in that table (src/config/regions.ts)
+ * every board's slug equals its id, and /api/boards publishes no slug column
+ * to read one from, so the id IS the slug here. The default board stays
+ * bare by the same literal the hosted regionHref uses: "sf".
+ */
+export function filmUrl(slug, region) {
+  const path = `/film/${slug}`;
+  if (!region || region === "sf") return `${SITE}${path}`;
+  return `${SITE}${path}/${region}`;
+}
+
+export function filmShape(f, { full = false, region } = {}) {
   if (!f) return null;
   const base = {
     key: f.key,
@@ -105,7 +125,7 @@ export function filmShape(f, { full = false } = {}) {
     runtime_min: f.runtimeMin ?? null,
     genres: f.genres ?? [],
     directors: f.directors ?? [],
-    url: `${SITE}/film/${f.slug}`,
+    url: filmUrl(f.slug, region),
   };
   if (!full) return base;
   return {
@@ -222,7 +242,8 @@ export function finish(base, lines) {
 /** Hosted `filmCandidatesText()`: one function renders the film miss for
  *  BOTH scenef_search_showtimes and scenef_film_details — a miss, or an
  *  ambiguity with the candidates and their film pages. The board is named
- *  by its region_name, from the feed. */
+ *  by its region_name, from the feed, and each candidate's page is that
+ *  board's page for it (filmUrl above). */
 export function filmCandidatesText(base, query, candidates) {
   if (!candidates.length) {
     return [
@@ -232,7 +253,7 @@ export function filmCandidatesText(base, query, candidates) {
   }
   return [
     `"${query}" is ambiguous — did you mean:`,
-    ...candidates.map((f) => `- ${f.title}${f.year ? ` (${f.year})` : ""} — ${f.slug} · ${SITE}/film/${f.slug}`),
+    ...candidates.map((f) => `- ${f.title}${f.year ? ` (${f.year})` : ""} — ${f.slug} · ${filmUrl(f.slug, base.region)}`),
     `Call again with the exact slug.`,
   ];
 }
