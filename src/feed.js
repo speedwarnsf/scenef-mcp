@@ -143,12 +143,32 @@ export async function resolvePlace(place) {
 //
 // A showtime at 12:40am belongs to the night before it. The board's day rolls
 // at 4am local, so "tonight" after midnight still means the evening you are
-// standing in. We ask the FEED which night that is (`?when=tonight` is the
-// site's own answer) and only compute it locally when the board is empty and
-// there is nothing to read the answer off of.
+// standing in.
+//
+// COMPUTED AT CALL TIME, NEVER READ OFF THE FEED. This server used to take
+// the feed's own `tonight_is` label as the answer. The feed is CDN-cached
+// (max-age 60, s-maxage 120, stale-while-revalidate 86400) on top of this
+// process's 60-second cache, so for minutes after midnight — and for as long
+// as an edge kept serving a stale copy — the label was the one computed
+// BEFORE the day rolled: "tomorrow" for a night the hosted server was
+// already calling tonight. The hosted tools never read a label; they run
+// tonight(d) (src/lib/data.ts) against Date.now() and the board's timezone
+// on every call. So does this file now. The rows come from the feed; the
+// clock is this process's, in the board's zone, through Intl and nothing
+// else.
 
 const DEFAULT_TZ = "America/Los_Angeles";
 const DOWS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** The 4am rollover — the single boundary the whole night law hangs on
+ *  (hosted NIGHT_ROLLOVER_MIN, src/lib/time.ts). */
+export const NIGHT_ROLLOVER_MIN = 4 * 60;
+
+/** How far INTO a screening it is still honest to call it catchable —
+ *  the hosted CATCHABLE_GRACE_MIN (src/lib/clocklaw.ts). tonight() keeps a
+ *  show this many minutes past its curtain; everything else asks
+ *  notStarted(), which keeps nothing. */
+export const CATCHABLE_GRACE_MIN = 20;
 
 /** A zone Intl accepts, or the default — the hosted safeZone(). A feed
  *  that named a zone this runtime lacks must not throw out of every tool. */
@@ -190,54 +210,120 @@ export function cityNow(timezone = DEFAULT_TZ, at = new Date()) {
   return { date, minutes, dow };
 }
 
-/** The 4am rule — the hosted liveNight(): before 4am the reader is still
- *  living yesterday's night, exactly as a 12:15am show is filed. */
-export function clockNight(timezone = DEFAULT_TZ, at = new Date()) {
-  const { date, minutes } = cityNow(timezone, at);
-  return minutes < 4 * 60 ? shiftDate(date, -1) : date;
+/** Epoch ms → the board's wall-clock parts — the hosted msToCityParts()
+ *  (src/lib/time.ts). getHours() would read THIS process's zone, which is
+ *  whatever machine the agent runs on; the theatre's clock is the only one
+ *  a night can be filed by. */
+export function msToCityParts(ms, timezone = DEFAULT_TZ) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: safeZone(timezone),
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(ms));
+  const get = (t) => parts.find((p) => p.type === t)?.value ?? "";
+  return {
+    date: `${get("year")}-${get("month")}-${get("day")}`,
+    minutes: (Number(get("hour")) % 24) * 60 + Number(get("minute")),
+  };
 }
 
-/** YYYY-MM-DD plus n days, without dragging in a date library. */
+/** The night the reader is living, with its clock — the hosted liveNight():
+ *  before 4am that is YESTERDAY'S night at minute 1440+, matching the way a
+ *  12:15am show is filed. Compare against nightClockOf() values only — both
+ *  sides sit on the same 28-hour dial. */
+export function liveNight(nowMs = Date.now(), timezone = DEFAULT_TZ) {
+  const { date, minutes } = msToCityParts(nowMs, timezone);
+  return minutes < NIGHT_ROLLOVER_MIN
+    ? { night: shiftDate(date, -1), minutes: minutes + 1440 }
+    : { night: date, minutes };
+}
+
+/** A screening's position on ITS OWN night's dial — the hosted
+ *  nightClockOf(): a 12:45am curtain is minute 1485 of its evening, not
+ *  minute 45 of the next day. Read off the literal HH:MM, which is the
+ *  venue's own wall clock. */
+export function nightClockOf(startsAt) {
+  const m = /T(\d{2}):(\d{2})/.exec(String(startsAt ?? ""));
+  const mins = m ? Number(m[1]) * 60 + Number(m[2]) : 0;
+  return mins < NIGHT_ROLLOVER_MIN ? mins + 1440 : mins;
+}
+
+/** Minutes since midnight of an instant, in the board's zone — the hosted
+ *  minutesOf() (src/lib/time.ts), Intl and nothing else. Feeds ONLY the
+ *  time_after/time_before filters, as it does there. */
+export function minutesOf(iso, timezone = DEFAULT_TZ) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: safeZone(timezone),
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(iso));
+  const get = (t) => Number(parts.find((p) => p.type === t)?.value ?? "0");
+  return (get("hour") % 24) * 60 + get("minute");
+}
+
+/** YYYY-MM-DD plus n days — the hosted shiftDate(), noon-anchored so no
+ *  zone or DST step can move the date. */
 export function shiftDate(date, days) {
-  const [y, m, d] = date.split("-").map(Number);
-  const t = Date.UTC(y, m - 1, d) + days * 86_400_000;
-  return new Date(t).toISOString().slice(0, 10);
+  const d = new Date(`${date}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Screenings for one evening (nightOf), soonest first — the hosted
+ *  night(d, nightIso) (src/lib/data.ts). */
+export function night(feed, nightIso) {
+  return (feed?.screenings ?? [])
+    .filter((s) => s.nightOf === nightIso)
+    .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
 }
 
 /**
- * Which night a `when=tonight` slice is, and what that night is RELATIVE TO
- * NOW — the hosted tonight(d) (src/lib/data.ts), read off the feed.
+ * THE HOSTED tonight(d) (src/lib/data.ts), over the board this process was
+ * handed, at the instant it is asked:
  *
- *   { night: "2026-09-09", label: "tonight" | "tomorrow" | "next" }
+ *   { nightIso, label: "tonight" | "tomorrow" | "next", screenings, spent, tonightOver }
  *
- * The feed labels its own roll-forward (`tonight_is`, 2026-09-05): a spent
- * or dark evening is served as the next lit night, and the label says so.
- * When the label is present it is the answer — it was computed by the same
- * function the hosted tools read. Older payloads without it get the hosted
- * rule applied to the slice's first night, in the board's own zone: the
- * live night (4am rule) or today's date is "tonight", the next calendar
- * date is "tomorrow", anything further is "next". An empty slice is the
- * calendar date, labelled tonight, as tonight(d) returns when nothing is
- * lit for a fortnight.
+ * The live night first (4am rule), clock-filtered to what a reader can
+ * still get to — a curtain within CATCHABLE_GRACE_MIN of now stays — then
+ * the calendar forward, up to a fortnight, until a night has a catchable
+ * screening. Only the live night is filtered by the clock: a future night
+ * has no "past". Labels are colloquial: the live night is "tonight" even
+ * when its date is yesterday's; once it is spent, the coming evening
+ * (today's date) is also "tonight"; the next calendar date is "tomorrow";
+ * anything further is "next". A board dark for a fortnight is today's date,
+ * labelled tonight, with no screenings.
+ *
+ * nowMs is injectable so the boundary can be held still in a test.
  */
-export function tonightIs(feed) {
-  const t = feed?.tonight_is;
-  if (t && typeof t === "object" && typeof t.night === "string" && t.night) {
-    const label = t.label === "tomorrow" || t.label === "next" ? t.label : "tonight";
-    return { night: t.night, label };
-  }
+export function tonight(feed, nowMs = Date.now()) {
   const tz = feed?.timezone;
-  const { date } = cityNow(tz);
-  const nights = (feed?.screenings ?? []).map((s) => s.nightOf).filter(Boolean).sort();
-  const night = nights[0];
-  if (!night) return { night: date, label: "tonight" };
-  const label =
-    night === clockNight(tz) || night === date ? "tonight" : night === shiftDate(date, 1) ? "tomorrow" : "next";
-  return { night, label };
-}
-
-/** Which night the board is currently calling tonight. */
-export async function tonightNight(region) {
-  const d = await listings(region ? { when: "tonight", region } : { when: "tonight" });
-  return tonightIs(d).night;
+  const { date } = msToCityParts(nowMs, tz);
+  const live = liveNight(nowMs, tz);
+  let tonightOver = false;
+  const nights = live.night === date ? [] : [live.night];
+  for (let i = 0; i < 14; i++) nights.push(shiftDate(date, i));
+  for (const nightIso of nights) {
+    const isLive = nightIso === live.night;
+    const s = night(feed, nightIso);
+    if (!s.length) {
+      // Sources delist past sessions; an empty live night late in the
+      // evening means spent, not dark.
+      if (isLive && live.minutes >= 21 * 60) tonightOver = true;
+      continue;
+    }
+    const showable = isLive ? s.filter((x) => nightClockOf(x.startsAt) >= live.minutes - CATCHABLE_GRACE_MIN) : s;
+    const spent = isLive ? s.filter((x) => nightClockOf(x.startsAt) < live.minutes - CATCHABLE_GRACE_MIN) : [];
+    if (!showable.length) {
+      tonightOver = true;
+      continue;
+    }
+    const label = isLive || nightIso === date ? "tonight" : nightIso === shiftDate(date, 1) ? "tomorrow" : "next";
+    return { nightIso, label, screenings: showable, spent, tonightOver };
+  }
+  return { nightIso: date, label: "tonight", screenings: [], spent: [], tonightOver };
 }

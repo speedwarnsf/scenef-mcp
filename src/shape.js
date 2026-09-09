@@ -5,7 +5,7 @@
 // published first. This module is the one place the two meet, so a field
 // renamed upstream breaks in exactly one file.
 
-import { SITE, shiftDate } from "./feed.js";
+import { SITE } from "./feed.js";
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const DAYS = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
@@ -168,15 +168,13 @@ export function screeningShape(s, venues, { detailed = false } = {}) {
 export const venueIndex = (feed) => new Map(feed.venues.map((v) => [v.id, v]));
 export const filmIndex = (feed) => new Map(feed.films.map((f) => [f.key, f]));
 
-const norm = (s) => String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
-
 /** The hosted normText(): lowercase, decomposed, diacritics dropped, every
  *  run of anything but a-z0-9 collapsed to ONE SPACE, trimmed. The space is
  *  load-bearing — word boundaries survive, so the substring test below runs
- *  over words rather than over the letters run together. norm() above,
- *  which collapses to nothing, is a different relation and produced a
- *  different candidate set for the same query. */
-const normText = (s) =>
+ *  over words rather than over the letters run together. A collapse-to-
+ *  nothing normaliser is a different relation and produced a different
+ *  candidate set for the same query. */
+export const normText = (s) =>
   String(s ?? "")
     .toLowerCase()
     .normalize("NFKD")
@@ -220,27 +218,39 @@ export function matchFilm(feed, query) {
   return { film: null, candidates: fuzzy.slice(0, 8) };
 }
 
-/** The same idea for theaters, which callers name by id, short name, or the
- *  name on the marquee. */
-export function matchVenue(feed, query) {
-  const q = norm(query);
-  if (!q) return { venue: null, candidates: [] };
-  const byId = feed.venues.find((v) => v.id === String(query).trim().toLowerCase());
-  if (byId) return { venue: byId, candidates: [] };
-  const exact = feed.venues.filter((v) => norm(v.name) === q || norm(v.short) === q);
-  if (exact.length === 1) return { venue: exact[0], candidates: [] };
-  const partial = feed.venues.filter((v) => norm(v.name).includes(q) || norm(v.short).includes(q));
-  if (partial.length === 1) return { venue: partial[0], candidates: [] };
-  return { venue: null, candidates: partial.slice(0, 8) };
+/** The hosted venue test, shared by matchVenue and the search venue filter:
+ *  EITHER-WAY substring between the normalised query and the venue's id,
+ *  name, or short name. "Roxie Theater San Francisco" reaches the Roxie
+ *  because the venue's name is inside the query; a name-only one-way test
+ *  called that a miss. Empty strings are skipped — the hosted code has
+ *  none to skip (every venue carries all three), and an empty side would
+ *  match every query. */
+export function venueHit(v, nq) {
+  return [v.id, v.name, v.short]
+    .filter((x) => typeof x === "string" && x)
+    .some((x) => {
+      const nx = normText(x);
+      return nx.includes(nq) || nq.includes(nx);
+    });
 }
 
-/** Fri/Sat/Sun of the week the given night sits in. */
-export function weekendNights(night) {
-  const dow = dowOf(night);
-  // Friday is 5. From Sunday (0) the weekend just past is the one you mean.
-  const toFriday = dow === 0 ? -2 : 5 - dow;
-  const friday = shiftDate(night, toFriday);
-  return [friday, shiftDate(friday, 1), shiftDate(friday, 2)];
+/**
+ * Theater match — the hosted matchVenue() (src/lib/mcp/tools.ts), as
+ * written: the id verbatim (trimmed, lowercased), then venueHit over every
+ * venue on the board. One hit is a hit; several are the first eight in
+ * board order; none is a miss. There is no exact-name stage and no
+ * one-way test: this server had both, and answered a query the hosted
+ * server resolves with a "No theater on this board" sentence.
+ */
+export function matchVenue(feed, query) {
+  const raw = String(query ?? "").trim().toLowerCase();
+  const byId = feed.venues.find((v) => v.id === raw);
+  if (byId) return { venue: byId, candidates: [] };
+  const nq = normText(query);
+  if (!nq) return { venue: null, candidates: [] };
+  const hits = feed.venues.filter((v) => venueHit(v, nq));
+  if (hits.length === 1) return { venue: hits[0], candidates: [] };
+  return { venue: null, candidates: hits.slice(0, 8) };
 }
 
 // ————————————————————————————————————————————— the hosted server's prose
