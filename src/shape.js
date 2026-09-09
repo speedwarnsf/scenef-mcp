@@ -170,25 +170,54 @@ export const filmIndex = (feed) => new Map(feed.films.map((f) => [f.key, f]));
 
 const norm = (s) => String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 
+/** The hosted normText(): lowercase, decomposed, diacritics dropped, every
+ *  run of anything but a-z0-9 collapsed to ONE SPACE, trimmed. The space is
+ *  load-bearing — word boundaries survive, so the substring test below runs
+ *  over words rather than over the letters run together. norm() above,
+ *  which collapses to nothing, is a different relation and produced a
+ *  different candidate set for the same query. */
+const normText = (s) =>
+  String(s ?? "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+
 /**
- * Fuzzy film match. Exact slug and exact title first, then prefix, then
- * substring. One survivor is a hit; several are candidates the caller picks
- * from; none is an honest miss. A miss is an ANSWER — it is never dressed up
- * as the whole board.
+ * Fuzzy film match — the hosted matchFilm() (src/lib/mcp/tools.ts), stage
+ * for stage, so the candidate list an ambiguous query gets is the same list
+ * in the same order on both transports:
+ *
+ *   1. the slug, verbatim (trimmed, lowercased)
+ *   2. "title year" normalised — one hit is a hit
+ *   3. the title normalised — one hit is a hit, several are ALL candidates
+ *   4. either-way substring on the normalised title — one hit is a hit,
+ *      several are the first eight in board order
+ *
+ * No prefix stage: the hosted matcher has none, and a prefix preference here
+ * ranked "The Hole" above "Ghost in the Shell" for film:"the" where the
+ * hosted answer lists them in board order. One survivor is a hit; several
+ * are candidates the caller picks from; none is an honest miss. A miss is
+ * an ANSWER — it is never dressed up as the whole board.
  */
 export function matchFilm(feed, query) {
-  const q = norm(query);
-  if (!q) return { film: null, candidates: [] };
-  const slug = feed.films.find((f) => f.slug === String(query).trim().toLowerCase());
-  if (slug) return { film: slug, candidates: [] };
-  const exact = feed.films.filter((f) => norm(f.title) === q);
+  const raw = String(query ?? "").trim().toLowerCase();
+  const bySlug = feed.films.find((f) => f.slug === raw);
+  if (bySlug) return { film: bySlug, candidates: [] };
+  const nq = normText(query);
+  if (!nq) return { film: null, candidates: [] };
+  const withYear = feed.films.filter((f) => normText(`${f.title} ${f.year ?? ""}`) === nq);
+  if (withYear.length === 1) return { film: withYear[0], candidates: [] };
+  const exact = feed.films.filter((f) => normText(f.title) === nq);
   if (exact.length === 1) return { film: exact[0], candidates: [] };
   if (exact.length > 1) return { film: null, candidates: exact };
-  const prefix = feed.films.filter((f) => norm(f.title).startsWith(q));
-  if (prefix.length === 1) return { film: prefix[0], candidates: [] };
-  const partial = prefix.length ? prefix : feed.films.filter((f) => norm(f.title).includes(q) || q.includes(norm(f.title)));
-  if (partial.length === 1) return { film: partial[0], candidates: [] };
-  return { film: null, candidates: partial.slice(0, 8) };
+  const fuzzy = feed.films.filter((f) => {
+    const nt = normText(f.title);
+    return nt.includes(nq) || nq.includes(nt);
+  });
+  if (fuzzy.length === 1) return { film: fuzzy[0], candidates: [] };
+  return { film: null, candidates: fuzzy.slice(0, 8) };
 }
 
 /** The same idea for theaters, which callers name by id, short name, or the
