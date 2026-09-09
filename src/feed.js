@@ -147,19 +147,54 @@ export async function resolvePlace(place) {
 // site's own answer) and only compute it locally when the board is empty and
 // there is nothing to read the answer off of.
 
-/** The 4am rule, used only as a fallback when the board has no screenings. */
-export function clockNight(timezone = "America/Los_Angeles", at = new Date()) {
+const DEFAULT_TZ = "America/Los_Angeles";
+const DOWS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** A zone Intl accepts, or the default — the hosted safeZone(). A feed
+ *  that named a zone this runtime lacks must not throw out of every tool. */
+function safeZone(tz) {
+  if (!tz || typeof tz !== "string") return DEFAULT_TZ;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return tz;
+  } catch {
+    return DEFAULT_TZ;
+  }
+}
+
+/**
+ * THE BOARD'S WALL CLOCK — the hosted cityNow(tz) (src/lib/time.ts), with
+ * Intl and nothing else. `date` is the calendar date where the theaters
+ * are, `minutes` the time of day there, `dow` Sunday = 0. This is what
+ * "today" means for a discount grid: the hosted discounts handler reads
+ * cityNow(d.timezone).dow, never the night. Reading the night instead put
+ * this server a day ahead of the hosted one once an evening was spent —
+ * the feed's tonight slice had rolled forward to the next lit night, and
+ * "today" rolled with it while the calendar had not.
+ */
+export function cityNow(timezone = DEFAULT_TZ, at = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: timezone,
+    timeZone: safeZone(timezone),
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
+    minute: "2-digit",
+    weekday: "short",
     hourCycle: "h23",
   }).formatToParts(at);
   const get = (t) => parts.find((p) => p.type === t)?.value ?? "";
   const date = `${get("year")}-${get("month")}-${get("day")}`;
-  return Number(get("hour")) < 4 ? shiftDate(date, -1) : date;
+  const minutes = Number(get("hour")) * 60 + Number(get("minute"));
+  const dow = DOWS.indexOf(get("weekday").slice(0, 3));
+  return { date, minutes, dow };
+}
+
+/** The 4am rule — the hosted liveNight(): before 4am the reader is still
+ *  living yesterday's night, exactly as a 12:15am show is filed. */
+export function clockNight(timezone = DEFAULT_TZ, at = new Date()) {
+  const { date, minutes } = cityNow(timezone, at);
+  return minutes < 4 * 60 ? shiftDate(date, -1) : date;
 }
 
 /** YYYY-MM-DD plus n days, without dragging in a date library. */
@@ -169,9 +204,40 @@ export function shiftDate(date, days) {
   return new Date(t).toISOString().slice(0, 10);
 }
 
+/**
+ * Which night a `when=tonight` slice is, and what that night is RELATIVE TO
+ * NOW — the hosted tonight(d) (src/lib/data.ts), read off the feed.
+ *
+ *   { night: "2026-09-09", label: "tonight" | "tomorrow" | "next" }
+ *
+ * The feed labels its own roll-forward (`tonight_is`, 2026-09-05): a spent
+ * or dark evening is served as the next lit night, and the label says so.
+ * When the label is present it is the answer — it was computed by the same
+ * function the hosted tools read. Older payloads without it get the hosted
+ * rule applied to the slice's first night, in the board's own zone: the
+ * live night (4am rule) or today's date is "tonight", the next calendar
+ * date is "tomorrow", anything further is "next". An empty slice is the
+ * calendar date, labelled tonight, as tonight(d) returns when nothing is
+ * lit for a fortnight.
+ */
+export function tonightIs(feed) {
+  const t = feed?.tonight_is;
+  if (t && typeof t === "object" && typeof t.night === "string" && t.night) {
+    const label = t.label === "tomorrow" || t.label === "next" ? t.label : "tonight";
+    return { night: t.night, label };
+  }
+  const tz = feed?.timezone;
+  const { date } = cityNow(tz);
+  const nights = (feed?.screenings ?? []).map((s) => s.nightOf).filter(Boolean).sort();
+  const night = nights[0];
+  if (!night) return { night: date, label: "tonight" };
+  const label =
+    night === clockNight(tz) || night === date ? "tonight" : night === shiftDate(date, 1) ? "tomorrow" : "next";
+  return { night, label };
+}
+
 /** Which night the board is currently calling tonight. */
 export async function tonightNight(region) {
   const d = await listings(region ? { when: "tonight", region } : { when: "tonight" });
-  const nights = d.screenings.map((s) => s.nightOf).filter(Boolean).sort();
-  return nights[0] ?? clockNight(d.timezone);
+  return tonightIs(d).night;
 }
