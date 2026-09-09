@@ -19,11 +19,14 @@ import {
   baseOf,
   both,
   displayTime,
+  filmCandidatesText,
   filmShape,
+  finish,
   matchFilm,
   matchVenue,
   nightLabel,
   screeningShape,
+  theaterCandidatesText,
   venueCard,
   venueIndex,
   venueShape,
@@ -326,11 +329,17 @@ tool(
       }
       L.push(`    ${SITE}/film/${f.slug}`);
     });
-    L.push("", `${data.attribution} · data as of ${data.data_as_of} · ${ACCURACY_CONTRACT}`);
-
-    return both(L.join("\n"), data);
+    return both(finish(data, L), data);
   },
 );
+
+// The hosted server's refusal, word for word (NEITHER in its tools.ts):
+// neither a film nor a venue is not an empty result, and the same sentence
+// rides in structuredContent.refusal on both transports.
+const NEITHER =
+  "scenef_search_showtimes needs either a film or at least one venue. It answers " +
+  "'where is this film playing' and 'what is on at this theater' — not 'what is on " +
+  "anywhere'. For the whole board, call scenef_whats_playing.";
 
 tool(
   "scenef_search_showtimes",
@@ -375,9 +384,8 @@ tool(
 
     const askedVenues = args.venues ?? [];
     if (!args.film && !askedVenues.length) {
-      const refusal =
-        "Pass a film, a theater, or both. Answering with the entire board would answer a question you did not ask — call scenef_whats_playing for that.";
-      return both(refusal, {
+      const refusal = NEITHER;
+      return both(finish(base, [refusal]), {
         ...base,
         query: null,
         matched: false,
@@ -406,9 +414,12 @@ tool(
       film = m.film;
       candidates = m.candidates;
       if (!film) {
-        const text = candidates.length
-          ? `No single match for "${args.film}". Did you mean:\n${candidates.map((c) => `  • ${c.title}${c.year ? ` (${c.year})` : ""} — slug ${c.slug}`).join("\n")}`
-          : `"${args.film}" is not on the ${feed.region ?? "current"} board right now. Call scenef_whats_playing to see what is.`;
+        // The same miss scenef_film_details gives, from the same function —
+        // the hosted server renders both through one filmCandidatesText().
+        // This said '"X" is not on the la-central board right now' while
+        // film_details said 'No film matching "X" in the current Central Los
+        // Angeles listings' — one contract, two sentences.
+        const text = finish(base, filmCandidatesText(base, args.film, candidates));
         return both(text, {
           ...base,
           query: args.film,
@@ -475,8 +486,7 @@ tool(
         L.push(`    ${s.ticketUrl}${detailed ? `  (${s.confidence ?? "?"} · ${s.source_tier ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
       }
     }
-    L.push("", `${base.attribution} · data as of ${base.data_as_of}`);
-    return both(L.join("\n"), data);
+    return both(finish(base, L), data);
   },
 );
 
@@ -501,9 +511,9 @@ tool(
     const { venue, candidates } = matchVenue(feed, args.theater);
 
     if (!venue) {
-      const text = candidates.length
-        ? `No single match for "${args.theater}". Did you mean:\n${candidates.map((c) => `  • ${c.name} — id ${c.id}`).join("\n")}`
-        : `"${args.theater}" is not a theater on the ${feed.region ?? "current"} board. Covered: ${feed.venues.map((v) => v.id).join(", ")}.`;
+      // The hosted words: 'No theater on this board matching "X".' and the
+      // whole id list after 'Known:', joined with ", " and never truncated.
+      const text = finish(base, theaterCandidatesText(args.theater, candidates, feed.venues));
       return both(text, {
         ...base,
         query: args.theater,
@@ -552,8 +562,7 @@ tool(
       L.push(`    ${s.ticketUrl}${detailed ? `  (${s.confidence ?? "?"} · ${s.source_tier ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
     }
     L.push("", `Calendar feed: ${card.calendar_feed}`);
-    L.push(`${base.attribution} · data as of ${base.data_as_of}`);
-    return both(L.join("\n"), data);
+    return both(finish(base, L), data);
   },
 );
 
@@ -581,10 +590,9 @@ tool(
       // The miss names the board it looked at, in the hosted server's words.
       // This said "the San Francisco board" for every region while its own
       // structuredContent said la-central — a caller reading the prose was
-      // told the wrong city had been searched.
-      const text = candidates.length
-        ? `No single match for "${args.film}". Did you mean:\n${candidates.map((c) => `  • ${c.title}${c.year ? ` (${c.year})` : ""} — slug ${c.slug}`).join("\n")}`
-        : `No film matching "${args.film}" in the current ${base.region_name} listings.\nTry scenef_whats_playing to browse what's on.`;
+      // told the wrong city had been searched. The sentence is shared with
+      // scenef_search_showtimes, as it is on the hosted server.
+      const text = finish(base, filmCandidatesText(base, args.film, candidates));
       return both(text, {
         ...base,
         query: args.film,
@@ -634,8 +642,8 @@ tool(
       L.push(`  ${s.nightOf} ${displayTime(s.startsAt)} — ${v?.name ?? s.venueId}${s.tags?.length ? ` [${s.tags.join(", ")}]` : ""}`);
       L.push(`    ${s.ticketUrl}${detailed ? `  (${s.confidence ?? "?"} · ${s.source_tier ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
     }
-    L.push("", `${SITE}/film/${film.slug}`, `${base.attribution} · data as of ${base.data_as_of}`);
-    return both(L.join("\n"), data);
+    L.push("", `${SITE}/film/${film.slug}`);
+    return both(finish(base, L), data);
   },
 );
 
@@ -790,8 +798,7 @@ tool(
       if (detailed) L.push(`   ${s.confidence ?? "?"} · ${s.source_tier ?? "?"} · verified ${s.verified_at ?? "?"}`);
     });
     L.push("", "Ranking is preference-fit only — never pay-ranked, and nothing is hidden from you.");
-    L.push(`${data.attribution} · data as of ${data.data_as_of}`);
-    return both(L.join("\n"), data);
+    return both(finish(data, L), data);
   },
 );
 
@@ -843,8 +850,7 @@ tool(
         L.push(`  ${d.applies_today ? "•" : "·"} ${d.label} — ${d.detail}${d.day !== null ? ` (${d.applies_today ? "today" : "day " + d.day})` : ""}`);
       }
     }
-    L.push("", `${base.attribution} · data as of ${base.data_as_of}`);
-    return both(L.join("\n"), data);
+    return both(finish(base, L), data);
   },
 );
 
@@ -922,8 +928,7 @@ tool(
       L.push(`  ${r.opening_venues.join(", ")}`);
       L.push(`  ${SITE}/film/${r.film.slug}`);
     }
-    L.push("", `${base.attribution} · data as of ${base.data_as_of}`);
-    return both(L.join("\n"), data);
+    return both(finish(base, L), data);
   },
 );
 
@@ -1053,6 +1058,15 @@ tool(
     // Freshness per source, computed from the whole board: a source is healthy
     // when its most recent verification landed within the last 24 hours. Stated
     // rather than assumed — `basis` says exactly what the number means.
+    //
+    // RECORDED GAP (2026-09-08 review), left as is on purpose. The hosted
+    // server's sources.healthy/total counts d.sourceHealth — one entry per
+    // venue, ok when that venue's own fetch succeeded — so it reports e.g.
+    // 17/17 where this reports 9/9 distinct sources verified within 24h. No
+    // public REST door exposes sourceHealth, so the two numbers cannot be
+    // made to agree from this side without inventing one; the fix is a REST
+    // door on the hosted side, not an approximation here. The description
+    // is shared with the hosted server and must not change for this.
     const latest = new Map();
     for (const s of board.screenings) {
       for (const src of s.sources ?? [s.provenance?.source].filter(Boolean)) {
@@ -1109,8 +1123,7 @@ tool(
     } else {
       L.push("Pass region= to any tool to read another board; the current set is listed at https://scenef.com/api/boards.");
     }
-    L.push("", `${base.attribution} · ${ACCURACY_CONTRACT}`);
-    return both(L.join("\n"), data);
+    return both(finish(base, L), data);
   },
 );
 
@@ -1163,7 +1176,15 @@ tool(
       for (const [k, v] of Object.entries(payload.method.confidence_levels)) L.push(`  ${k}: ${v}`);
       L.push("", `Rings: ${payload.method.rings.join(" · ")}`);
     }
-    L.push("", `Full record: ${payload.docs}`);
+    // The one tool whose tail is its own, mirrored per tool: the hosted
+    // accuracySnapshot() does not go through finish(). It ends with the
+    // record's url and method page, then the attribution line WITHOUT the
+    // "accuracy record:" suffix — this answer IS the record.
+    L.push(
+      "",
+      `Full JSON: ${SITE}/api/accuracy · method: ${payload.docs}`,
+      `— Showtimes via SceneF.com, data as of ${payload.data_as_of}`,
+    );
     return both(L.join("\n"), record);
   },
 );
