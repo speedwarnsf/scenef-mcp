@@ -2,10 +2,10 @@
 #
 # It implements the Model Context Protocol itself over stdio and reads its
 # data from SceneF's public, key-less REST API. Nothing here proxies MCP
-# traffic to another endpoint: the nine tools are registered, dispatched, and
+# traffic to another endpoint: the ten tools are registered, dispatched, and
 # answered by the process this image starts.
 #
-# The hosted server at https://scenef.com/mcp speaks the same nine tools over
+# The hosted server at https://scenef.com/mcp speaks the same ten tools over
 # streamable HTTP, for clients that prefer a URL to a subprocess.
 
 FROM node:22-alpine

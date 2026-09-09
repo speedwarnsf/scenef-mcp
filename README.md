@@ -14,7 +14,7 @@ verifies each showtime against the theater's own box office, so nobody ever
 drives to a dark theater.
 
 Remote MCP server, streamable HTTP, no API key, read-only — and a local
-stdio server in this repo, running the same nine tools.
+stdio server in this repo, running the same ten tools.
 
 **Every tool takes a `region`** — `"sf"`, `"la-central"`, `"oahu"`,
 `"sacramento"`, … — and omitting it means the default board (`sf`), never a
@@ -53,7 +53,7 @@ Also listed in the official MCP registry as `com.scenef/showtimes`.
 
 This repo is also a **local MCP server** — Node, stdio, no proxy. It speaks
 the protocol itself and reads the same board over SceneF's public REST API.
-Same nine tools, same schemas, same descriptions, same numbers; pick the
+Same ten tools, same schemas, same descriptions, same numbers; pick the
 transport your client prefers.
 
 ```bash
@@ -87,7 +87,7 @@ No API key, no account, no configuration. It sends `User-Agent:
 scenef-mcp-local/1.1`, issues nothing but `GET`, and has no write path
 anywhere in it.
 
-`npm test` runs two suites: `test/contract.js` calls all nine tools against
+`npm test` runs two suites: `test/contract.js` calls all ten tools against
 the live board and validates every payload against the output schema the
 server advertises, and `test/parity.js` diffs this server's tool definitions
 against the hosted endpoint's — one contract, two transports, proven rather
@@ -104,6 +104,7 @@ than asserted.
 | `scenef_plan_movie_night` | Constraints in (time window, genres, formats, theaters), a plan out |
 | `scenef_discounts` | The cheap nights, board-wide |
 | `scenef_coming_soon` | What's opening next |
+| `scenef_resolve_board` | A city, ZIP, neighborhood or alias to the board that covers it — or a refusal that says which kind of no |
 | `scenef_now` | Right-now snapshot: what's catchable at this hour |
 | `scenef_accuracy` | Our own verification record — checks run, failed, and unreachable |
 

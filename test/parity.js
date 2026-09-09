@@ -1,7 +1,7 @@
 // ONE CONTRACT, TWO TRANSPORTS — proven, not asserted.
 //
 // This server and the hosted one at https://scenef.com/mcp publish the same
-// nine tools. If the names, descriptions, or input schemas drift apart, an
+// ten tools. If the names, descriptions, or input schemas drift apart, an
 // agent that learned the contract from one is quietly mis-informed about the
 // other, and the difference will surface as a wrong answer rather than an
 // error. So the two are diffed against each other, live.

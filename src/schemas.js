@@ -9,7 +9,7 @@
 //
 // A declared outputSchema that rejects its own payload is worse than none:
 // the tool fails at call time, in the caller's client, with a validation
-// error the server never saw in testing. test/contract.js calls all nine
+// error the server never saw in testing. test/contract.js calls all ten
 // tools against the live feed for exactly that reason.
 
 import { z } from "zod";

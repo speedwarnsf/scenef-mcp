@@ -1,4 +1,4 @@
-// The nine tools — the SAME nine the hosted server at https://scenef.com/mcp
+// The ten tools — the SAME ten the hosted server at https://scenef.com/mcp
 // registers, with the same names, the same input schemas, and the same
 // descriptions word for word.
 //
@@ -70,7 +70,7 @@ const regionParam = z
 /**
  * ALL THREE HINTS, EXPLICITLY, ON EVERY TOOL.
  *
- * The values are facts about these nine tools, not paperwork:
+ * The values are facts about these ten tools, not paperwork:
  *   readOnlyHint    true  — every tool reads the board; there is no write
  *                           path anywhere in this server, and the REST client
  *                           issues nothing but GET.

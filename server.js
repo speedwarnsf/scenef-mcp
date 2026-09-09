@@ -4,10 +4,10 @@
 //
 // This process IS the server: it implements the protocol itself and reads its
 // data from SceneF's public, key-less REST contract (https://scenef.com/agents).
-// It is not a bridge and does not proxy MCP traffic anywhere — the nine tools
+// It is not a bridge and does not proxy MCP traffic anywhere — the ten tools
 // are registered, dispatched, and answered here.
 //
-// The hosted server at https://scenef.com/mcp speaks the same nine tools over
+// The hosted server at https://scenef.com/mcp speaks the same ten tools over
 // streamable HTTP. Same names, same schemas, same words, same numbers; use
 // whichever transport your client prefers.
 //
@@ -21,7 +21,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ACCURACY_CONTRACT, TOOLS } from "./src/tools.js";
 
 export const SERVER_NAME = "scenef";
-export const SERVER_VERSION = "1.3.0";
+export const SERVER_VERSION = "1.4.0";
 
 /** What the server tells a client at initialize — the hosted server's words. */
 export const INSTRUCTIONS = [
