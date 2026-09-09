@@ -11,7 +11,7 @@
 FROM node:22-alpine
 
 LABEL org.opencontainers.image.title="scenef-mcp"
-LABEL org.opencontainers.image.description="San Francisco movie showtimes over MCP — every screen in the city, verified against each theater's own box office."
+LABEL org.opencontainers.image.description="Movie showtimes across California and Hawaii over MCP — 33 regional boards, chains, indies, and repertory houses, verified against each theater's own calendar. Local stdio server, read-only, no API key."
 LABEL org.opencontainers.image.source="https://github.com/speedwarnsf/scenef-mcp"
 LABEL org.opencontainers.image.licenses="MIT"
 
