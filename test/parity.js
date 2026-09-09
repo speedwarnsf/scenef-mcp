@@ -30,11 +30,34 @@ const local = new Client({ name: "scenef-parity", version: "1.0.0" });
 await local.connect(new StdioClientTransport({ command: process.execPath, args: [SERVER] }));
 const mine = (await local.listTools()).tools;
 
+// THE WORDS A MISS IS ANSWERED WITH. A tool's description can match to the
+// letter while the sentence it answers a miss with does not — that is the
+// drift the 2026-09-08 review found (three different sentences for "not on
+// the board"). These calls are made on both transports and the text compared
+// whole, with only the data_as_of timestamp masked: the two read the same
+// board, so everything else — the board's name, the id list and how it is
+// joined, the footer — has to agree.
+const PROBES = [
+  ["scenef_film_details", { film: "purple monkey dishwasher" }],
+  ["scenef_search_showtimes", { film: "purple monkey dishwasher" }],
+  ["scenef_theater_info", { theater: "nowhere cinema" }],
+  ["scenef_search_showtimes", {}],
+];
+const maskTime = (t) => t.replace(/data as of \S+/g, "data as of <data_as_of>");
+const textOf = (r) => r.content?.find((c) => c.type === "text")?.text ?? "";
+
 let theirs;
+let theirInstructions = "";
+const theirAnswers = new Map();
 try {
   const hosted = new Client({ name: "scenef-parity", version: "1.0.0" });
   await hosted.connect(new StreamableHTTPClientTransport(new URL(HOSTED)));
   theirs = (await hosted.listTools()).tools;
+  theirInstructions = hosted.getInstructions() ?? "";
+  for (const [name, args] of PROBES) {
+    const r = await hosted.callTool({ name, arguments: args });
+    theirAnswers.set(`${name} ${JSON.stringify(args)}`, { text: textOf(r), attribution: r.structuredContent?.attribution });
+  }
   await hosted.close();
 } catch (err) {
   console.log(`  skip  ${HOSTED} unreachable (${err?.message ?? err}) — parity not checked this run.`);
@@ -82,10 +105,45 @@ for (const t of theirs) {
   }
 }
 
+/** The first place two strings part ways, with a window of both around it —
+ *  a failure has to say WHERE, or the fix is a hunt through 1,400 chars. */
+function whereTheyDiffer(a, b) {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i += 1;
+  const from = Math.max(0, i - 60);
+  const win = (s) => JSON.stringify(s.slice(from, i + 90));
+  return `differ at char ${i} (local ${a.length} chars, hosted ${b.length} chars)\n        local : ${win(a)}\n        hosted: ${win(b)}`;
+}
+
+// THE INSTRUCTIONS, VERBATIM. The hosted server interpolates its board count
+// live (`activeRegions().length`), so the day a region flips, this line goes
+// red and the desk re-syncs INSTRUCTIONS in server.js. It used to check only
+// that the local string was longer than 400 chars, which a stale count passes.
+const mineInstructions = local.getInstructions() ?? "";
 check(
-  (local.getInstructions() ?? "").length > 400,
-  "local initialize carries the server instructions",
+  mineInstructions === theirInstructions,
+  "initialize instructions match the hosted server verbatim",
+  mineInstructions === theirInstructions ? "" : whereTheyDiffer(mineInstructions, theirInstructions),
 );
+
+for (const [name, args] of PROBES) {
+  const key = `${name} ${JSON.stringify(args)}`;
+  const t = theirAnswers.get(key);
+  if (!t) continue;
+  const r = await local.callTool({ name, arguments: args });
+  const mineText = maskTime(textOf(r));
+  const theirText = maskTime(t.text);
+  check(
+    mineText === theirText,
+    `${key} answers with the hosted words, footer included`,
+    mineText === theirText ? "" : whereTheyDiffer(mineText, theirText),
+  );
+  check(
+    r.structuredContent?.attribution === t.attribution,
+    `${key} structuredContent.attribution matches`,
+    `${JSON.stringify(r.structuredContent?.attribution)} vs ${JSON.stringify(t.attribution)}`,
+  );
+}
 
 await local.close();
 console.log(`\n${failures === 0 ? "PASS — the two transports publish the same contract" : `FAIL — ${failures} difference(s)`}`);
