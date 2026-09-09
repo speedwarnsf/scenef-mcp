@@ -14,13 +14,14 @@
 // contract at https://scenef.com/agents. Both answer from the same numbers.
 
 import { z } from "zod";
-import { SITE, accuracyRecord, boardsList, listings, resolvePlace, shiftDate, tonightNight } from "./feed.js";
+import { SITE, accuracyRecord, boardsList, cityNow, listings, resolvePlace, shiftDate, tonightIs, tonightNight } from "./feed.js";
 import {
   baseOf,
   both,
   displayTime,
   filmCandidatesText,
   filmShape,
+  filmUrl,
   finish,
   matchFilm,
   matchVenue,
@@ -101,6 +102,9 @@ const DETAILED_CARRIES_ACCURACY =
 
 const isDetailed = (args) => args?.response_format === "detailed";
 
+/** The hosted DAY_NAMES, indexed by cityNow().dow (Sunday = 0). */
+const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
 // ————————————————————————————————————————————————————————— the window
 //
 // "tonight" is a question for the board, not for this process. The night rolls
@@ -108,13 +112,34 @@ const isDetailed = (args) => args?.response_format === "detailed";
 // ask the feed which night it is currently calling tonight and slice from
 // there. Only an empty board falls back to computing it locally.
 
+/**
+ * THE LABEL SAYS WHICH NIGHT "TONIGHT" TURNED OUT TO BE — the hosted
+ * resolveWhen() (src/lib/mcp/tools.ts), word for word. The feed's tonight
+ * slice rolls forward once the evening is spent or dark, and a caller who
+ * asked for tonight and is handed tomorrow's matinees under the word
+ * "tonight" has been told a wrong night. This server said "tonight"
+ * unconditionally; the hosted server says which:
+ *
+ *   tonight                          the slice is the board's live night
+ *   tomorrow (nothing tonight)       it rolled forward one calendar day
+ *   <Weekday, Month D> (next lit night)   it rolled further
+ */
+function tonightLabel(t) {
+  return t.label === "tonight"
+    ? "tonight"
+    : t.label === "tomorrow"
+      ? "tomorrow (nothing tonight)"
+      : `${nightLabel(t.night)} (next lit night)`;
+}
+
 async function windowFor(when, extra = {}) {
   const raw = String(when ?? "tonight").trim().toLowerCase();
   const t = await tonightNight(extra.region);
 
   if (raw === "" || raw === "tonight" || raw === "today") {
     const feed = await listings({ when: "tonight", ...extra });
-    return { label: "tonight", nights: [t], feed, screenings: feed.screenings, warning: null };
+    const ti = tonightIs(feed);
+    return { label: tonightLabel(ti), nights: [ti.night], feed, screenings: feed.screenings, warning: null };
   }
   if (raw === "tomorrow") {
     const n = shiftDate(t, 1);
@@ -141,9 +166,10 @@ async function windowFor(when, extra = {}) {
   // A parameter we cannot honor is reported, never ignored. Silently answering
   // for tonight without saying so is the worst failure this product has.
   const feed = await listings({ when: "tonight", ...extra });
+  const ti = tonightIs(feed);
   return {
-    label: "tonight",
-    nights: [t],
+    label: tonightLabel(ti),
+    nights: [ti.night],
     feed,
     screenings: feed.screenings,
     warning: `Unrecognized when="${when}". Use tonight, tomorrow, weekend, or YYYY-MM-DD. Answered for tonight instead.`,
@@ -816,10 +842,14 @@ tool(
     void args;
     const feed = await listings(args.region ? { region: args.region } : {});
     const base = baseOf(feed);
-    const tonight = await tonightNight(args.region);
-    const { dowOf, dayName } = await import("./shape.js");
-    const today_dow = dowOf(tonight);
-    const today_name = dayName(tonight);
+    // TODAY IS THE BOARD'S CALENDAR DATE, not the night — the hosted
+    // discountsData reads cityNow(d.timezone).dow. This derived it from the
+    // feed's tonight slice, which rolls forward to the NEXT lit night once
+    // the evening is spent, so at 11pm on a Tuesday this said Wednesday's
+    // discounts applied while the hosted server, and the box office, said
+    // Tuesday's. The zone is the feed's; the clock is Intl's.
+    const { dow: today_dow } = cityNow(base.timezone);
+    const today_name = DAY_NAMES[today_dow];
 
     let applies_today_count = 0;
     const venues = feed.venues
@@ -827,9 +857,12 @@ tool(
       .map((v) => ({
         ...venueShape(v),
         discounts: (v.discounts ?? []).map((d) => {
-          // A discount with no day runs every day; a day-bound one only counts
-          // today when today is that day.
-          const applies_today = d.day === undefined || d.day === null ? true : d.day === today_dow;
+          // The hosted rule: applies_today is `disc.day === dow`, so only a
+          // DAY-BOUND discount whose day is today applies today, and the
+          // count is of those. A discount with no day — matinee, membership,
+          // a discount card — "runs on its own terms any day" in the hosted
+          // prose and is not counted; this counted every one of them.
+          const applies_today = d.day !== undefined && d.day !== null && d.day === today_dow;
           if (applies_today) applies_today_count += 1;
           return {
             label: d.label,
@@ -1038,11 +1071,11 @@ tool(
     // Which night the board is calling tonight, and whether it is: the feed
     // labels its own roll-forward (tonight_is, 2026-09-05), so a dark or spent
     // evening is reported as the next lit night rather than as an empty
-    // tonight. Older payloads without the label fall back to the night the
-    // slice's screenings sit on.
-    const tonightIs = feed.tonight_is && typeof feed.tonight_is === "object" ? feed.tonight_is : null;
-    const tonight = tonightIs?.night ?? (await tonightNight(args.region));
-    const is_tonight = tonightIs ? tonightIs.label === "tonight" : true;
+    // tonight. Older payloads without the label get the hosted tonight()
+    // rule applied to the slice, in the board's zone (tonightIs in feed.js).
+    const ti = tonightIs(feed);
+    const tonight = ti.night;
+    const is_tonight = ti.label === "tonight";
 
     const base = baseOf(feed);
     const venues = venueIndex(board);
