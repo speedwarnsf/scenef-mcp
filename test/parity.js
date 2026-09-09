@@ -42,7 +42,55 @@ const PROBES = [
   ["scenef_search_showtimes", { film: "purple monkey dishwasher" }],
   ["scenef_theater_info", { theater: "nowhere cinema" }],
   ["scenef_search_showtimes", {}],
+  // AN AMBIGUOUS FILM, ON TWO BOARDS. "the" matches dozens of titles, so the
+  // answer is the candidate list — its members, their ORDER, and each one's
+  // film page. The local matcher was exact → prefix → substring where the
+  // hosted one is substring in board order, and it printed /film/{slug}
+  // from every board where the hosted server prints /film/{slug}/la-central
+  // off a non-default one. Both drifts are visible in this one sentence.
+  ["scenef_search_showtimes", { film: "the" }],
+  ["scenef_search_showtimes", { film: "the", region: "la-central" }],
+  ["scenef_film_details", { film: "the", region: "la-central" }],
 ];
+
+// THE NUMBERS AND THE NIGHTS. The prose of these tools is laid out
+// differently on the two transports by design, so the text is not compared;
+// the fields a caller branches on are. Each probe names the fields that must
+// agree, read from structuredContent on both sides at (nearly) the same
+// instant:
+//   discounts       today is the board's CALENDAR date in its own zone, not
+//                   the night the tonight slice rolled forward to — oahu is
+//                   three hours behind and crosses midnight at a different
+//                   instant, so the pair catches a "today" read off the
+//                   wrong clock;
+//   whats_playing   the window label says WHICH night "tonight" resolved to
+//                   ("tonight" / "tomorrow (nothing tonight)" / "<night>
+//                   (next lit night)"), and film_count is the number of rows
+//                   RETURNED under max_results, not the number matched;
+//   plan / now      the same label and night, where they are also used.
+const same = (...keys) => (s) => Object.fromEntries(keys.map((k) => [k, s?.[k]]));
+const FIELDS = [
+  ["scenef_discounts", {}, same("today_dow", "today_name", "applies_today_count")],
+  ["scenef_discounts", { region: "oahu" }, same("today_dow", "today_name", "applies_today_count")],
+  ["scenef_whats_playing", { max_results: 3 }, (s) => ({ ...same("window", "nights", "film_count")(s), films_returned: s?.films?.length })],
+  ["scenef_whats_playing", { max_results: 3, region: "la-central" }, (s) => ({ ...same("window", "nights", "film_count")(s), films_returned: s?.films?.length })],
+  ["scenef_plan_movie_night", { region: "la-central" }, same("window", "nights")],
+  ["scenef_now", { region: "la-central" }, same("night_of", "is_tonight")],
+  ["scenef_coming_soon", { region: "la-central", horizon_days: 7 }, same("film_count")],
+];
+
+// FILM URLS OFF A NON-DEFAULT BOARD. The two transports may rank a list
+// differently, so the urls are not compared row for row: the hosted answer's
+// first film gives the SHAPE (/film/{slug}/la-central), and every local film
+// on the same board must fit it. A bare /film/{slug} here sends a Los Angeles
+// reader to San Francisco's showtimes for the film, or to a 404.
+const URL_SHAPE = [
+  ["scenef_whats_playing", { max_results: 3, region: "la-central" }, (s) => s?.films ?? []],
+  ["scenef_coming_soon", { region: "la-central", horizon_days: 7 }, (s) => s?.films ?? []],
+  ["scenef_now", { region: "la-central" }, (s) => (s?.next_curtains ?? []).map((c) => c.film).filter(Boolean)],
+];
+
+const keyOf = (name, args) => `${name} ${JSON.stringify(args)}`;
 const maskTime = (t) => t.replace(/data as of \S+/g, "data as of <data_as_of>");
 const textOf = (r) => r.content?.find((c) => c.type === "text")?.text ?? "";
 
@@ -54,9 +102,11 @@ try {
   await hosted.connect(new StreamableHTTPClientTransport(new URL(HOSTED)));
   theirs = (await hosted.listTools()).tools;
   theirInstructions = hosted.getInstructions() ?? "";
-  for (const [name, args] of PROBES) {
+  for (const [name, args] of [...PROBES, ...FIELDS, ...URL_SHAPE]) {
+    const key = keyOf(name, args);
+    if (theirAnswers.has(key)) continue;
     const r = await hosted.callTool({ name, arguments: args });
-    theirAnswers.set(`${name} ${JSON.stringify(args)}`, { text: textOf(r), attribution: r.structuredContent?.attribution });
+    theirAnswers.set(key, { text: textOf(r), attribution: r.structuredContent?.attribution, data: r.structuredContent });
   }
   await hosted.close();
 } catch (err) {
@@ -126,11 +176,19 @@ check(
   mineInstructions === theirInstructions ? "" : whereTheyDiffer(mineInstructions, theirInstructions),
 );
 
+// One local call per distinct probe, whichever lists name it.
+const mineAnswers = new Map();
+async function callMine(name, args) {
+  const key = keyOf(name, args);
+  if (!mineAnswers.has(key)) mineAnswers.set(key, await local.callTool({ name, arguments: args }));
+  return mineAnswers.get(key);
+}
+
 for (const [name, args] of PROBES) {
-  const key = `${name} ${JSON.stringify(args)}`;
+  const key = keyOf(name, args);
   const t = theirAnswers.get(key);
   if (!t) continue;
-  const r = await local.callTool({ name, arguments: args });
+  const r = await callMine(name, args);
   const mineText = maskTime(textOf(r));
   const theirText = maskTime(t.text);
   check(
@@ -142,6 +200,41 @@ for (const [name, args] of PROBES) {
     r.structuredContent?.attribution === t.attribution,
     `${key} structuredContent.attribution matches`,
     `${JSON.stringify(r.structuredContent?.attribution)} vs ${JSON.stringify(t.attribution)}`,
+  );
+}
+
+for (const [name, args, fields] of FIELDS) {
+  const key = keyOf(name, args);
+  const t = theirAnswers.get(key);
+  if (!t) continue;
+  const r = await callMine(name, args);
+  const mine = fields(r.structuredContent);
+  const their = fields(t.data);
+  for (const k of Object.keys(their)) {
+    const a = JSON.stringify(mine[k]);
+    const b = JSON.stringify(their[k]);
+    check(a === b, `${key} ${k} agrees with the hosted server`, `${a} vs ${b}`);
+  }
+}
+
+for (const [name, args, films] of URL_SHAPE) {
+  const key = keyOf(name, args);
+  const t = theirAnswers.get(key);
+  if (!t) continue;
+  const r = await callMine(name, args);
+  const theirFilms = films(t.data);
+  const mineFilms = films(r.structuredContent);
+  const first = theirFilms[0];
+  if (!first?.url || !first?.slug) {
+    console.log(`  skip  ${key} — the hosted answer carried no film to take the url shape from`);
+    continue;
+  }
+  const shape = first.url.split(first.slug).join("{slug}");
+  const wrong = mineFilms.filter((f) => f.url !== shape.split("{slug}").join(f.slug));
+  check(
+    mineFilms.length > 0 && !wrong.length,
+    `${key} every film url fits the hosted shape ${shape}`,
+    wrong.length ? wrong.slice(0, 3).map((f) => f.url).join(", ") : mineFilms.length ? "" : "no films returned locally",
   );
 }
 
