@@ -300,16 +300,22 @@ tool(
 
     const cap = Math.min(Math.max(args.max_results ?? 12, 1), 25);
     const chosen = ranked.slice(0, cap);
+    const base = baseOf(w.feed);
 
     const data = {
-      ...baseOf(w.feed),
+      ...base,
       window: w.label,
       nights: w.nights,
       note: w.warning,
       notable,
-      film_count: ranked.length,
+      // THE NUMBER RETURNED, not the number matched — the hosted
+      // whatsPlayingData reports sel.entries.length, and its selection is
+      // already capped at max_results, so film_count is the length of
+      // films[]. This reported every film that matched before the cap, and
+      // a caller asking for 3 read film_count 41 beside a three-row array.
+      film_count: chosen.length,
       films: chosen.map((e) => ({
-        ...filmShape(e.film),
+        ...filmShape(e.film, { region: base.region }),
         venue_count: e.venue_count,
         showtime_count: e.showtimes.length,
         next_showtime: screeningShape(e.showtimes[0], venues, { detailed: false }),
@@ -329,7 +335,7 @@ tool(
         L.push(`  • ${n.title} — ${n.venue}, ${n.local_time}${n.reasons.length ? ` (${n.reasons.join("; ")})` : ""}`);
       }
     }
-    L.push("", `${ranked.length} film${ranked.length === 1 ? "" : "s"}, ${screenings.length} screening${screenings.length === 1 ? "" : "s"}.`);
+    L.push("", `${chosen.length} film${chosen.length === 1 ? "" : "s"}, ${screenings.length} screening${screenings.length === 1 ? "" : "s"}.`);
     if (!ranked.length) {
       L.push("", "Nothing on the board matches. Widen the window or drop a filter.");
     }
@@ -353,7 +359,7 @@ tool(
         }
         if (e.showtimes.length > 8) L.push(`      …${e.showtimes.length - 8} more`);
       }
-      L.push(`    ${SITE}/film/${f.slug}`);
+      L.push(`    ${filmUrl(f.slug, base.region)}`);
     });
     return both(finish(data, L), data);
   },
@@ -451,7 +457,7 @@ tool(
           query: args.film,
           matched: false,
           filtered_by: "film",
-          candidates: candidates.map((c) => filmShape(c)),
+          candidates: candidates.map((c) => filmShape(c, { region: base.region })),
           unknown_venues,
           coverage_note: null,
           showtime_count: 0,
@@ -479,7 +485,7 @@ tool(
       query: film ? args.film : null,
       matched: screenings.length > 0,
       filtered_by: film ? "film" : "venue",
-      ...(film ? { film: filmShape(film) } : {}),
+      ...(film ? { film: filmShape(film, { region: base.region }) } : {}),
       unknown_venues,
       coverage_note: unknown_venues.length
         ? `Not on the board: ${unknown_venues.join(", ")}. Theater ids come from scenef_theater_info or venues[] in the feed.`
@@ -489,7 +495,7 @@ tool(
         ...venueShape(venues.get(id) ?? { id, name: id, short: id }),
         showtimes: list.map((s) => ({
           ...screeningShape(s, venues, { detailed }),
-          ...(venueMode ? { film: filmShape(films.get(s.filmKey)) } : {}),
+          ...(venueMode ? { film: filmShape(films.get(s.filmKey), { region: base.region }) } : {}),
         })),
       })),
     };
@@ -566,7 +572,7 @@ tool(
       upcoming_count: upcoming.length,
       upcoming: upcoming.map((s) => ({
         ...screeningShape(s, venues, { detailed }),
-        film: filmShape(films.get(s.filmKey)),
+        film: filmShape(films.get(s.filmKey), { region: base.region }),
       })),
     };
 
@@ -623,7 +629,7 @@ tool(
         ...base,
         query: args.film,
         matched: false,
-        candidates: candidates.map((c) => filmShape(c)),
+        candidates: candidates.map((c) => filmShape(c, { region: base.region })),
       });
     }
 
@@ -636,7 +642,7 @@ tool(
     const final_night = nights.length ? nights[nights.length - 1] : null;
     const tonight = await tonightNight(args.region);
 
-    const card = filmShape(film, { full: true });
+    const card = filmShape(film, { full: true, region: base.region });
     const data = {
       ...base,
       query: args.film,
@@ -668,7 +674,7 @@ tool(
       L.push(`  ${s.nightOf} ${displayTime(s.startsAt)} — ${v?.name ?? s.venueId}${s.tags?.length ? ` [${s.tags.join(", ")}]` : ""}`);
       L.push(`    ${s.ticketUrl}${detailed ? `  (${s.confidence ?? "?"} · ${s.source_tier ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
     }
-    L.push("", `${SITE}/film/${film.slug}`);
+    L.push("", card.url);
     return both(finish(base, L), data);
   },
 );
@@ -782,6 +788,13 @@ tool(
       why: is_wildcard
         ? [...(s.match?.why ?? []), "Wildcard — outside the genres you named"]
         : s.match?.why ?? [],
+      // BARE, ON PURPOSE. The hosted planMovieNightData shapes this film
+      // with filmJson(film) and no region slug (tools.ts, the one call site
+      // without one), so a plan's film.url is /film/{slug} on every board —
+      // verified against la-central 2026-09-08. Every other tool scopes the
+      // url to the board; this one mirrors the hosted answer as it is, not
+      // as it should be. When the hosted side threads the slug through, add
+      // `{ region: ... }` here and nowhere else.
       film: filmShape(films.get(s.filmKey)),
       showtime: screeningShape(s, venues, { detailed: true }),
     });
@@ -944,7 +957,11 @@ tool(
       ...base,
       horizon_days,
       film_count: rows.length,
-      films: rows.map((r) => ({ ...filmShape(r.film), first_night: r.first_night, opening_venues: r.opening_venues })),
+      films: rows.map((r) => ({
+        ...filmShape(r.film, { region: base.region }),
+        first_night: r.first_night,
+        opening_venues: r.opening_venues,
+      })),
     };
 
     const L = [`Coming soon — ${rows.length} film${rows.length === 1 ? "" : "s"} whose first screening on this board is more than 48 hours out, within ${horizon_days} days.`];
@@ -959,7 +976,7 @@ tool(
       L.push("");
       L.push(`${nightLabel(r.first_night)} — ${r.film.title}${r.film.year ? ` (${r.film.year})` : ""}`);
       L.push(`  ${r.opening_venues.join(", ")}`);
-      L.push(`  ${SITE}/film/${r.film.slug}`);
+      L.push(`  ${filmUrl(r.film.slug, base.region)}`);
     }
     return both(finish(base, L), data);
   },
@@ -1121,7 +1138,7 @@ tool(
       still_to_come: stillToCome.length,
       next_curtains: next.map((s) => ({
         ...screeningShape(s, venues, { detailed }),
-        film: filmShape(films.get(s.filmKey)),
+        film: filmShape(films.get(s.filmKey), { region: base.region }),
       })),
       sources: {
         healthy,
