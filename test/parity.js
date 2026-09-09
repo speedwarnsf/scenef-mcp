@@ -24,6 +24,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { notableItem } from "../src/tools.js";
 
 const HOSTED = process.env.SCENEF_MCP_URL ?? "https://scenef.com/mcp";
 const SERVER = resolve(dirname(fileURLToPath(import.meta.url)), "..", "server.js");
@@ -291,6 +292,89 @@ for (const [name, args, fields] of FIELDS) {
       check(a === b, `${key} ${k} agrees with the hosted server`, a === b ? "" : `${a} vs ${b}`);
     }
   }
+}
+
+// ————————————————————————————————————————————— the shapes on the wire
+//
+// Two payloads whose KEY SET is the contract, not only the values a caller
+// branches on — a key present on one transport and absent on the other is a
+// type guard the caller did not know to write:
+//   refusal   scenef_search_showtimes with neither film nor venue answers
+//             the hosted union shape: filtered_by "venue" and an empty
+//             candidates[] ride beside the refusal, so `.filtered_by` and
+//             `.candidates` read on EVERY search payload. This server
+//             omitted both;
+//   notable   whats_playing's notable[] is at most FIVE items, each exactly
+//             {title, venue, local_time, night_of, evidence, ticket_url} —
+//             the hosted map over NotableItem, evidence being the primary
+//             reason's receipt. This server shipped every item, each with
+//             film_slug/screening_id/reasons[] instead. The live check
+//             needs a fact on the hosted board tonight; a quiet night falls
+//             back to the local mapper against the hosted key list, copied
+//             from tools.ts, so the shape is asserted on every run.
+const keysOf = (o) => Object.keys(o ?? {}).sort().join(", ");
+{
+  const args = {};
+  const key = keyOf("scenef_search_showtimes", args);
+  const { their, mine: r } = await pair("scenef_search_showtimes", args);
+  const a = keysOf(r.structuredContent);
+  const b = keysOf(their.structuredContent);
+  check(a === b, `${key} refusal structuredContent has the hosted key set`, a === b ? "" : `local : ${a}\n        hosted: ${b}`);
+  const pick = same("query", "matched", "filtered_by", "refusal", "candidates", "showtime_count", "venues", "unknown_venues", "coverage_note");
+  const mineF = pick(r.structuredContent);
+  const theirF = pick(their.structuredContent);
+  for (const k of Object.keys(theirF)) {
+    const x = JSON.stringify(mineF[k]);
+    const y = JSON.stringify(theirF[k]);
+    check(x === y, `${key} refusal ${k} agrees with the hosted server`, x === y ? "" : `${x} vs ${y}`);
+  }
+}
+{
+  // The hosted item's keys, verbatim from whatsPlayingData (tools.ts).
+  const HOSTED_NOTABLE_KEYS = ["title", "venue", "local_time", "night_of", "evidence", "ticket_url"].sort().join(", ");
+  const localShape = keysOf(
+    notableItem({
+      screeningId: "s1",
+      filmKey: "k",
+      filmSlug: "slug",
+      title: "T",
+      venueId: "v",
+      venue: "V",
+      startsAt: "2026-01-01T19:00:00-08:00",
+      nightOf: "2026-01-01",
+      time: "7:00 PM",
+      reasons: [{ why: "last-night", evidence: "last night of the run" }],
+      ticketUrl: "https://scenef.com/go/s1",
+    }),
+  );
+  check(
+    localShape === HOSTED_NOTABLE_KEYS,
+    "notable item shape has the hosted key set (static, from the local mapper)",
+    localShape === HOSTED_NOTABLE_KEYS ? "" : `local : ${localShape}\n        hosted: ${HOSTED_NOTABLE_KEYS}`,
+  );
+
+  let compared = 0;
+  for (const args of [{ max_results: 3 }, { max_results: 3, region: "la-central" }, { max_results: 25 }]) {
+    const key = keyOf("scenef_whats_playing", args);
+    const { their, mine: r } = await pair("scenef_whats_playing", args);
+    const mineN = r.structuredContent?.notable ?? [];
+    const theirN = their.structuredContent?.notable ?? [];
+    check(Array.isArray(mineN) && mineN.length <= 5, `${key} notable carries at most 5 items`, `${mineN.length} items`);
+    if (!theirN.length) continue;
+    const want = keysOf(theirN[0]);
+    if (!mineN.length) {
+      console.log(`  skip  ${key} notable item keys — the hosted board carried ${theirN.length} fact(s) this second and the feed copy none; shape checked statically above`);
+      continue;
+    }
+    const wrong = mineN.filter((n) => keysOf(n) !== want);
+    check(
+      !wrong.length,
+      `${key} every notable item has the hosted key set`,
+      wrong.length ? `local : ${keysOf(wrong[0])}\n        hosted: ${want}` : "",
+    );
+    compared += 1;
+  }
+  if (!compared) console.log("        (no notable fact on the hosted boards this run — the item shape was asserted statically against the hosted key list)");
 }
 
 // ———————————————————————————————————————————————— the header line

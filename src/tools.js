@@ -230,21 +230,43 @@ function resolveWhen(feed, when) {
   };
 }
 
+/** ONE NOTABLE ITEM ON THE WIRE — the hosted whatsPlayingData map over a
+ *  NotableItem (tools.ts), key for key: title, venue, local_time, night_of,
+ *  evidence, ticket_url, and nothing else. The feed carries the hosted
+ *  NotableItem verbatim (api/listings serializes notable.items as computed),
+ *  so `venue` is already the venue's SHORT name and `time` already the wall
+ *  clock in the board's zone; both pass straight through. `evidence` is the
+ *  PRIMARY reason's receipt: reasons[] arrives priority-sorted (measured
+ *  urgency, then finality, then print, live, price) and the hosted mapping
+ *  reads reasons[0]?.evidence ?? null — one receipt, never a join of them.
+ *  This server shipped film_slug, screening_id and a reasons[] array on
+ *  every item, so the same fact answered in two shapes. The two fallbacks
+ *  (`?? displayTime`, `?? null`) only keep the key present if a feed row
+ *  ever omits the field; when it is there the value is the hosted one.
+ *  Exported so the parity test can assert the key set without a live fact. */
+export function notableItem(n) {
+  return {
+    title: n.title,
+    venue: n.venue,
+    local_time: n.time ?? displayTime(n.startsAt),
+    night_of: n.nightOf,
+    evidence: n.reasons?.[0]?.evidence ?? null,
+    ticket_url: n.ticketUrl ?? null,
+  };
+}
+
+/** At most this many notable items ride structuredContent — the hosted
+ *  `.slice(0, 5)` in whatsPlayingData. The lead is a headline, not the list. */
+const NOTABLE_CAP = 5;
+
 /** The notable lead is strictly about tonight, so — the hosted rule — an
- *  item ships only when ITS night is inside the window asked for. */
+ *  item ships only when ITS night is inside the window asked for; then the
+ *  cap, then the shape. This server shipped every qualifying item. */
 function notableFor(feed, nights) {
   return (feed.notable?.items ?? [])
     .filter((n) => nights.includes(n.nightOf))
-    .map((n) => ({
-      title: n.title,
-      venue: n.venue,
-      local_time: n.time ?? displayTime(n.startsAt),
-      night_of: n.nightOf,
-      film_slug: n.filmSlug ?? null,
-      screening_id: n.screeningId ?? null,
-      ticket_url: n.ticketUrl ?? null,
-      reasons: (n.reasons ?? []).map((r) => r.evidence ?? r.why),
-    }));
+    .slice(0, NOTABLE_CAP)
+    .map(notableItem);
 }
 
 /** First sentence of the overview, as the one-line hook — the hosted hook(). */
@@ -377,9 +399,11 @@ tool(
 
     const L = [];
     if (notable.length) {
+      // The same five items the JSON carries, each with its one receipt —
+      // the hosted prose also prints reasons[0].evidence and stops at five.
       L.push("Notable tonight — scarcity facts, with evidence:");
-      for (const n of notable.slice(0, 6)) {
-        L.push(`  • ${n.title} — ${n.venue}, ${n.local_time}${n.reasons.length ? ` (${n.reasons.join("; ")})` : ""}`);
+      for (const n of notable) {
+        L.push(`  • ${n.title} — ${n.venue}, ${n.local_time}${n.evidence ? ` (${n.evidence})` : ""}`);
       }
       L.push("");
     }
@@ -470,15 +494,26 @@ tool(
     const askedVenues = args.venues ?? [];
     if (!wantFilm && !askedVenues.length) {
       const refusal = NEITHER;
+      // The hosted searchShowtimesData refusal, key for key and in its
+      // order (tools.ts). The three search answers — refusal, ambiguity,
+      // match — form a union with ONE key set, so a caller can ask
+      // `.filtered_by` or `.candidates` of any search payload and get a
+      // straight answer: "venue" (the mode the selection reports when no
+      // film carried the query) and [] here. This server omitted both, and
+      // wrote query:null where the hosted server echoes p.film ?? null —
+      // the same null for an absent film, the caller's own blank for a
+      // whitespace one.
       return both(finish(base, [refusal]), {
         ...base,
-        query: null,
+        query: args.film ?? null,
         matched: false,
+        filtered_by: "venue",
         refusal,
-        unknown_venues: [],
-        coverage_note: null,
+        candidates: [],
         showtime_count: 0,
         venues: [],
+        unknown_venues: [],
+        coverage_note: null,
       });
     }
 
