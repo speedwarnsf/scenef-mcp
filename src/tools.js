@@ -121,11 +121,11 @@ const isDetailed = (args) => args?.response_format === "detailed";
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 /** The hosted sitePlace(): the states the lit boards sit in, serially —
- *  "California and Hawaii" while each has a board. It names the
+ *  "California, Florida and Hawaii" while each has a board. It names the
  *  whats_playing title and the search coverage note. The parity test
  *  compares the title verbatim, so a third state lit on the hosted side
  *  goes red here rather than drifting. */
-const SITE_PLACE = "California and Hawaii";
+const SITE_PLACE = "California, Florida and Hawaii";
 
 // —————————————————————————————————————————————————————————— the clock
 //

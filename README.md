@@ -7,8 +7,8 @@ Built by movie lovers, for movie lovers and their assistants.
 SceneF started in San Francisco — one of the last great moviegoing cities:
 single-screen neighborhood houses from the 1920s, repertory calendars that
 change nightly, 35mm and 70mm prints, midnight movies, and yes, the
-multiplexes too. It now runs **33 regional boards across California and
-Hawaii** — Los Angeles to Sacramento, San Diego to Maui — and more states
+multiplexes too. It now runs **56 regional boards across California, Florida and
+Hawaii** — Los Angeles to Sacramento, San Diego to Maui, Miami to Pensacola — and more states
 are soaking. Every board puts every screen in its region on one page and
 verifies each showtime against the theater's own box office, so nobody ever
 drives to a dark theater.
