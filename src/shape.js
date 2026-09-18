@@ -48,14 +48,17 @@ export const ATTRIBUTION = "SceneF — https://scenef.com";
 
 /** Provenance every structured payload carries. */
 export function baseOf(feed) {
+  const region = feed.region ?? "sf";
+  const accuracy = new URL(feed.accuracy ?? `${SITE}/api/accuracy`);
+  if (region !== "sf") accuracy.searchParams.set("region", region);
   return {
     data_as_of: feed.data_as_of ?? feed.generated,
     attribution: ATTRIBUTION,
-    accuracy_url: feed.accuracy ?? `${SITE}/api/accuracy`,
+    accuracy_url: accuracy.toString(),
     // Board identity, from the feed (2026-09-08): the answer names which
     // board it read, in the reader's own words. region_name ships with
     // region or not at all — there is no handle without its label.
-    region: feed.region ?? "sf",
+    region,
     region_name: feed.region_name ?? feed.region ?? "sf",
     timezone: feed.timezone ?? "America/Los_Angeles",
   };
@@ -73,9 +76,10 @@ export function venueShape(v) {
 
 /** The full theater card — everything the venue record carries that a
  *  moviegoer would act on, plus the two public urls for it. */
-export function venueCard(v) {
+export function venueCard(v, { region } = {}) {
   return {
     ...venueShape(v),
+    region: v.region ?? region,
     address: v.address ?? null,
     website: v.website ?? null,
     lat: v.lat ?? null,
@@ -91,7 +95,7 @@ export function venueCard(v) {
     preshow_min: v.preshowMin ?? null,
     nonprofit: v.nonprofit ?? null,
     calendar_feed: `${SITE}/feeds/theater/${v.id}.ics`,
-    url: `${SITE}/theaters`,
+    url: `${SITE}/theater/${v.id}`,
   };
 }
 
@@ -140,10 +144,14 @@ export function filmShape(f, { full = false, region } = {}) {
   };
 }
 
-/** One showtime. `detailed` adds the accuracy fields the description
- *  promises: confidence level, source tier, reporting sources, verified_at. */
-export function screeningShape(s, venues, { detailed = false } = {}) {
+/** Evidence accompanies every emitted screening, in both response modes.
+ * Freshness comes from the canonical feed's cadence calculation; never
+ * infer it from the dataset publication timestamp. */
+export function screeningShape(s, venues, { region, detailed = false } = {}) {
   const v = venues.get(s.venueId);
+  const hint = region && region !== "sf" ? `?region=${encodeURIComponent(region)}` : "";
+  const ticket = new URL(s.ticketUrl ?? `${SITE}/go/${s.id}${hint}`);
+  if (hint && !ticket.searchParams.has("region")) ticket.searchParams.set("region", region);
   const out = {
     screening_id: s.id,
     venue: venueShape(v) ?? { venue_id: s.venueId, name: s.venueId, short: s.venueId, neighborhood: null },
@@ -151,18 +159,18 @@ export function screeningShape(s, venues, { detailed = false } = {}) {
     night_of: s.nightOf,
     local_time: displayTime(s.startsAt),
     tags: s.tags ?? [],
-    ticket_url: s.ticketUrl ?? `${SITE}/go/${s.id}`,
-  };
-  if (s.note) out.note = s.note;
-  if (!detailed) return out;
-  return {
-    ...out,
+    ticket_url: ticket.toString(),
+    calendar_url: s.calendar_url ?? `${SITE}/feeds/screening/${s.id}.ics${hint}`,
     confidence: s.confidence ?? s.provenance?.confidence ?? null,
-    source_tier: s.source_tier ?? s.provenance?.sourceTier ?? null,
-    sources: s.sources ?? s.provenance?.sources ?? [],
+    source_tier: s.source_tier ?? s.provenance?.sourceTier ?? "unknown",
+    sources: s.sources ?? s.provenance?.sources ?? [s.provenance?.source].filter(Boolean),
     verified_at: s.verified_at ?? s.provenance?.lastVerifiedAt ?? null,
-    calendar_feed: `${SITE}/feeds/screening/${s.id}.ics`,
+    ...(s.freshness ? { freshness: s.freshness } : {}),
   };
+  // Keep the local server's former detailed key as a compatibility alias.
+  if (detailed) out.calendar_feed = out.calendar_url;
+  if (s.note) out.note = s.note;
+  return out;
 }
 
 export const venueIndex = (feed) => new Map(feed.venues.map((v) => [v.id, v]));
@@ -317,7 +325,17 @@ export function theaterCandidatesText(query, candidates, venues) {
 /** Text helpers — every tool renders the same answer twice, once for a
  *  reader and once for a parser, from ONE computation. */
 export function both(text, data) {
-  return { content: [{ type: "text", text }], structuredContent: data };
+  const stale = new Set();
+  const visit = (row) => {
+    if (!row || typeof row !== "object") return;
+    if (row.screening_id && row.freshness?.status === "stale") stale.add(row.screening_id);
+    for (const child of Object.values(row)) visit(child);
+  };
+  visit(data);
+  const note = stale.size
+    ? `\n\nFreshness: ${stale.size} listed screenings have stale source verification. Confirm those times with the box office; structured rows carry the source status and age.`
+    : "";
+  return { content: [{ type: "text", text: text + note }], structuredContent: data };
 }
 
 export const nn = (list) => list.filter(Boolean);

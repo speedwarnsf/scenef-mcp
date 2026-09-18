@@ -12,9 +12,9 @@
 // error the server never saw in testing. test/contract.js calls all ten
 // tools against the live feed for exactly that reason.
 
-import { z } from "zod";
+import { z } from "zod/v4";
 
-/** zod v3 spelling of the hosted server's looseObject. */
+/** Same loose nested-object contract as the hosted server. */
 const loose = (shape) => z.object(shape).passthrough();
 
 /** Provenance every structured payload carries. */
@@ -42,6 +42,19 @@ export const screeningOut = loose({
   local_time: z.string(),
   tags: z.array(z.string()),
   ticket_url: z.string(),
+  calendar_url: z.string(),
+  confidence: z.enum(["venue-published", "corroborated", "single-source", "disputed"]).nullable(),
+  source_tier: z.string(),
+  sources: z.array(z.string()),
+  verified_at: z.string().nullable(),
+  note: z.string().optional(),
+  freshness: z.object({
+    status: z.enum(["current", "stale", "unknown"]),
+    age_hours: z.number().nullable(),
+    stale_after_hours: z.number(),
+    retained: z.boolean(),
+    source_status: z.enum(["ok", "held", "failed", "unknown"]),
+  }).optional(),
 });
 
 export const filmOut = loose({
@@ -62,15 +75,15 @@ export const whatsPlayingOut = z.object({
   note: z.string().nullable(),
   notable: z.array(loose({ title: z.string(), venue: z.string(), local_time: z.string() })),
   film_count: z.number(),
-  // showtimes is OPTIONAL, not absent: concise omits the array (2026-09-08
-  // wire ruling, −85%) while showtime_count stays required in both modes —
-  // an absent array with no count would be indistinguishable from a film
-  // with no showtimes, the "nothing there vs could not look" law again.
+  // Keep the original required array for clients holding older definitions.
+  // Concise carries one row and explicitly identifies an incomplete array.
   films: z.array(
     filmOut.extend({
       venue_count: z.number(),
       showtime_count: z.number(),
-      showtimes: z.array(screeningOut).optional(),
+      next_showtime: screeningOut,
+      showtimes: z.array(screeningOut),
+      showtimes_complete: z.boolean().describe("Whether showtimes includes all showtime_count screenings. Concise includes only the next screening; detailed includes all."),
     }),
   ),
 });
@@ -82,6 +95,7 @@ export const searchOut = z.object({
   // matched:false is a real answer, not an error — a caller branches here
   // before reading `film`, and gets `candidates` when the name was ambiguous.
   matched: z.boolean(),
+  warnings: z.array(z.string()),
   // Which parameter carried the query. A venue-scoped answer has no `film`
   // BY DESIGN, and without this a caller cannot tell that from a film-scoped
   // answer that lost one.
@@ -134,6 +148,7 @@ export const planOut = z.object({
   party_size: z.number().nullable(),
   note: z.string().nullable(),
   discounts_relaxed: z.boolean(),
+  warnings: z.array(z.string()),
   plan_count: z.number(),
   plans: z.array(
     loose({
@@ -190,8 +205,7 @@ export const nowOut = z.object({
 /** The published shape of the accuracy record. Loose where the record may
  *  grow, exact on the numbers a caller would quote. */
 export const accuracyOutput = z.object({
-  data_as_of: z.string(),
-  attribution: z.string(),
+  ...baseOut,
   site: loose({
     checks: z.number(),
     confirmed: z.number(),

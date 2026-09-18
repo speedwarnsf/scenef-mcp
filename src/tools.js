@@ -13,7 +13,9 @@
 // dataset in process; this one reads the same board over the public REST
 // contract at https://scenef.com/agents. Both answer from the same numbers.
 
-import { z } from "zod";
+// The declared dependency bundles v4; use the same JSON Schema dialect as
+// the hosted MCP server, including input-mode object handling.
+import { z } from "zod/v4";
 import {
   SITE,
   accuracyRecord,
@@ -65,7 +67,7 @@ const responseFormat = z
   .enum(["concise", "detailed"])
   .optional()
   .describe(
-    'Output size. "concise" (default) is tight text plus a structured summary — on list-shaped tools each film carries showtime_count and next_showtime, but NOT the full showtimes array. "detailed" adds the per-showtime rows with ids, ticket urls, and accuracy metadata. Concise measures ~10KB where detailed measures ~69KB, so ask for detailed when you need the rows and scenef_search_showtimes when you need them for one film or theatre.',
+    'Output size. "concise" (default) is tight text plus a structured summary. In whats_playing, each film has the total showtime_count, next_showtime, and a showtimes array containing only that next screening; showtimes_complete says whether the array is exhaustive. "detailed" includes all selected showtime rows with ids, ticket urls, and accuracy metadata. Use scenef_search_showtimes for all times for one film or theatre.',
   );
 
 const whenParam = z
@@ -113,7 +115,7 @@ export const ACCURACY_CONTRACT =
   "Accuracy is computed, not claimed: every showtime carries a confidence level, a source tier, and a last-verified time, and the running record of our own verification checks — failures included — is public at https://scenef.com/api/accuracy.";
 
 const DETAILED_CARRIES_ACCURACY =
-  '"detailed" adds the full showtimes array, each row carrying its confidence level, source tier, reporting sources and verified_at timestamp; "concise" gives showtime_count and next_showtime instead.';
+  'Every emitted showtime carries confidence, source tier, reporting sources and verified_at. In whats_playing, "concise" gives the total showtime_count and one next screening in showtimes; showtimes_complete identifies a partial array. "detailed" includes the full array.';
 
 const isDetailed = (args) => args?.response_format === "detailed";
 
@@ -168,9 +170,16 @@ function parseHHMM(text) {
   if (!text) return undefined;
   const m = /^(\d{1,2}):(\d{2})$/.exec(String(text).trim());
   if (!m) return undefined;
+  if (Number(m[1]) > 23 || Number(m[2]) > 59) return undefined;
   let mins = Number(m[1]) * 60 + Number(m[2]);
   if (mins < 4 * 60) mins += 1440;
   return mins;
+}
+
+function isCalendarDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const ms = Date.parse(`${value}T12:00:00Z`);
+  return Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 10) === value;
 }
 
 // ————————————————————————————————————————————————————————— the window
@@ -220,7 +229,7 @@ function resolveWhen(feed, when) {
     }
     return { nights, label: `this weekend (${nights.map(nightLabel).join(" · ")})` };
   }
-  if (/^\d{4}-\d{2}-\d{2}$/.test(token)) {
+  if (isCalendarDate(token)) {
     return { nights: [token], label: nightLabel(token) };
   }
   return {
@@ -389,11 +398,11 @@ tool(
         hook: hook(film),
         venue_count: new Set(shows.map((s) => s.venueId)).size,
         showtime_count: shows.length,
-        next_showtime: screeningShape(shows[0], venues, { detailed: false }),
-        // The rows themselves only in detailed — the 2026-09-08 wire ruling.
-        // Concise keeps the count and the next curtain; search_showtimes is
-        // the tool for full rows scoped to one film or theatre.
-        ...(detailed ? { showtimes: shows.map((s) => screeningShape(s, venues, { detailed })) } : {}),
+        next_showtime: screeningShape(shows[0], venues, { detailed, region: base.region }),
+        // Older installed definitions require an array in both modes.
+        // The total and completeness flag make a concise sample explicit.
+        showtimes: (detailed ? shows : shows.slice(0, 1)).map((s) => screeningShape(s, venues, { detailed, region: base.region })),
+        showtimes_complete: detailed || shows.length <= 1,
       })),
     };
 
@@ -401,7 +410,7 @@ tool(
     if (notable.length) {
       // The same five items the JSON carries, each with its one receipt —
       // the hosted prose also prints reasons[0].evidence and stops at five.
-      L.push("Notable tonight — scarcity facts, with evidence:");
+      L.push("Notable tonight — scarcity facts with receipts, not taste:");
       for (const n of notable) {
         L.push(`  • ${n.title} — ${n.venue}, ${n.local_time}${n.evidence ? ` (${n.evidence})` : ""}`);
       }
@@ -426,7 +435,7 @@ tool(
         for (const s of shows.slice(0, 8)) {
           const v = venues.get(s.venueId);
           L.push(
-            `      ${displayTime(s.startsAt)} ${v?.short ?? s.venueId}${s.tags?.length ? ` [${s.tags.join(", ")}]` : ""} — ${s.ticketUrl} (${s.confidence ?? "?"}, verified ${s.verified_at ?? "?"})`,
+            `      ${displayTime(s.startsAt)} ${v?.short ?? s.venueId}${s.tags?.length ? ` [${s.tags.join(", ")}]` : ""} — ${screeningShape(s, venues, { region: base.region }).ticket_url} (${s.confidence ?? "?"}, verified ${s.verified_at ?? "?"})`,
           );
         }
         if (shows.length > 8) L.push(`      …${shows.length - 8} more`);
@@ -507,6 +516,7 @@ tool(
         ...base,
         query: args.film ?? null,
         matched: false,
+        warnings: [],
         filtered_by: "venue",
         refusal,
         candidates: [],
@@ -528,6 +538,7 @@ tool(
           ...base,
           query: args.film,
           matched: false,
+          warnings: [],
           filtered_by: "film",
           candidates: m.candidates.map((c) => filmShape(c, { region: base.region })),
           unknown_venues: [],
@@ -552,18 +563,28 @@ tool(
     const unusable = [];
     if (args.date !== undefined) {
       const raw = String(args.date).trim();
-      const today = cityNow(base.timezone).date;
+      const today = liveNight(Date.now(), base.timezone).night;
       const spoken = { tonight: today, today, tomorrow: shiftDate(today, 1) };
-      const resolved = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : spoken[raw.toLowerCase()];
+      const resolved = isCalendarDate(raw) ? raw : spoken[raw.toLowerCase()];
       if (resolved) shows = shows.filter((s) => s.nightOf === resolved);
-      else if (raw) unusable.push(`date="${raw}" is not a night I can read — use YYYY-MM-DD, or "tonight"/"tomorrow"`);
+      else unusable.push(`date="${raw}" is not a night I can read — use YYYY-MM-DD, or "tonight"/"tomorrow"`);
     }
     const after = parseHHMM(args.time_after);
     const before = parseHHMM(args.time_before);
     if (after !== undefined) shows = shows.filter((s) => eveningMinutes(s, base.timezone) >= after);
-    else if (args.time_after) unusable.push(`time_after="${args.time_after}" is not a time I can read — use "HH:MM" on a 24-hour clock`);
+    else if (args.time_after !== undefined) unusable.push(`time_after="${args.time_after}" is not a time I can read — use "HH:MM" on a 24-hour clock`);
     if (before !== undefined) shows = shows.filter((s) => eveningMinutes(s, base.timezone) <= before);
-    else if (args.time_before) unusable.push(`time_before="${args.time_before}" is not a time I can read — use "HH:MM" on a 24-hour clock`);
+    else if (args.time_before !== undefined) unusable.push(`time_before="${args.time_before}" is not a time I can read — use "HH:MM" on a 24-hour clock`);
+    if (after !== undefined && before !== undefined && after > before)
+      unusable.push("time_after is later than time_before in the same movie night");
+    if (unusable.length) {
+      const refusal = `No search was run: ${unusable.join("; ")}. Correct the filters and try again.`;
+      return both(finish(base, [refusal]), {
+        ...base, query: args.film ?? null, matched: false,
+        filtered_by: film ? "film" : "venue", refusal, warnings: unusable,
+        candidates: [], showtime_count: 0, venues: [], unknown_venues: [], coverage_note: null,
+      });
+    }
 
     // Theaters: every asked name is an either-way substring test against
     // each venue's id, name and short name, and a name can reach SEVERAL
@@ -600,6 +621,7 @@ tool(
       // filtered list under a real film is still matched:true. This said
       // false whenever the filters left nothing, which reads as "no such film".
       matched: true,
+      warnings: [],
       filtered_by: film ? "film" : "venue",
       ...(film ? { film: filmShape(film, { region: base.region }) } : {}),
       unknown_venues,
@@ -608,18 +630,13 @@ tool(
       venues: [...grouped.entries()].map(([id, list]) => ({
         ...venueShape(venues.get(id) ?? { id, name: id, short: id }),
         showtimes: list.map((s) => ({
-          ...screeningShape(s, venues, { detailed }),
+          ...screeningShape(s, venues, { detailed, region: base.region }),
           ...(venueMode ? { film: filmShape(films.get(s.filmKey), { region: base.region }) } : {}),
         })),
       })),
     };
 
     const L = [];
-    // The unusable filters lead, before any result. A caller who reads the
-    // showtimes first and the note second has already believed the answer.
-    if (unusable.length) {
-      L.push(`Unrecognized and NOT applied: ${unusable.join("; ")}. The results below are unfiltered by ${unusable.length === 1 ? "it" : "them"}.`);
-    }
     if (!shows.length) {
       // The hosted empty answer, in its order: the absence, then the
       // coverage boundary, then the film page.
@@ -637,7 +654,7 @@ tool(
         const bits = [displayTime(s.startsAt), venueMode ? films.get(s.filmKey)?.title ?? "" : ""].filter(Boolean);
         const tags = s.tags?.length ? ` [${s.tags.join(", ")}]` : "";
         L.push(`  ${bits.join(" — ")}${tags}  ${s.nightOf}`);
-        L.push(`    ${s.ticketUrl}${detailed ? `  (${s.confidence ?? "?"} · ${s.source_tier ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
+        L.push(`    ${screeningShape(s, venues, { region: base.region }).ticket_url}${detailed ? `  (${s.confidence ?? "?"} · ${s.source_tier ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
       }
     }
     return both(finish(base, L), data);
@@ -684,7 +701,7 @@ tool(
     const next = upcoming(feed).filter((s) => s.venueId === venue.id);
     const shown = next.slice(0, 5);
 
-    const card = venueCard(venue);
+    const card = venueCard(venue, { region: base.region });
     const data = {
       ...base,
       query: args.theater,
@@ -692,7 +709,7 @@ tool(
       venue: card,
       upcoming_count: next.length,
       upcoming: shown.map((s) => ({
-        ...screeningShape(s, venues, { detailed }),
+        ...screeningShape(s, venues, { detailed, region: base.region }),
         film: filmShape(films.get(s.filmKey), { region: base.region }),
       })),
     };
@@ -712,7 +729,7 @@ tool(
     if (!shown.length) L.push("  Nothing further on the board for this theater.");
     for (const s of shown) {
       L.push(`  ${s.nightOf} ${displayTime(s.startsAt)} — ${films.get(s.filmKey)?.title ?? s.filmKey}`);
-      L.push(`    ${s.ticketUrl}${detailed ? `  (${s.confidence ?? "?"} · ${s.source_tier ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
+      L.push(`    ${screeningShape(s, venues, { region: base.region }).ticket_url}${detailed ? `  (${s.confidence ?? "?"} · ${s.source_tier ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
     }
     if (next.length > 5) L.push(`  (${next.length} upcoming in total)`);
     L.push("", `Calendar feed: ${card.calendar_feed}`);
@@ -784,7 +801,7 @@ tool(
       final_night,
       is_last_night: showtimes.length > 0 && final_night === today,
       showtime_count: showtimes.length,
-      showtimes: showtimes.map((s) => screeningShape(s, venues, { detailed })),
+      showtimes: showtimes.map((s) => screeningShape(s, venues, { detailed, region: base.region })),
     };
 
     const L = [`${film.title}${film.year ? ` (${film.year})` : ""}`];
@@ -807,7 +824,7 @@ tool(
     for (const s of showtimes.slice(0, 40)) {
       const v = venues.get(s.venueId);
       L.push(`  ${s.nightOf} ${displayTime(s.startsAt)} — ${v?.name ?? s.venueId}${s.tags?.length ? ` [${s.tags.join(", ")}]` : ""}`);
-      L.push(`    ${s.ticketUrl}${detailed ? `  (${s.confidence ?? "?"} · ${s.source_tier ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
+      L.push(`    ${screeningShape(s, venues, { region: base.region }).ticket_url}${detailed ? `  (${s.confidence ?? "?"} · ${s.source_tier ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
     }
     L.push("", card.url);
     return both(finish(base, L), data);
@@ -890,6 +907,7 @@ tool(
         party_size: party,
         note: lines.join(" "),
         discounts_relaxed: false,
+        warnings: lines,
         plan_count: 0,
         plans: [],
         wildcard: null,
@@ -910,6 +928,12 @@ tool(
     // widen a window the caller said they cannot make.
     const after = parseHHMM(p.time_after);
     const before = parseHHMM(p.time_before);
+    const invalid = ["time_after", "time_before"].filter((key) => p[key] !== undefined && parseHHMM(p[key]) === undefined);
+    if (invalid.length || (after !== undefined && before !== undefined && after > before)) {
+      return problem([invalid.length
+        ? `Invalid ${invalid.join(", ")}: use a real local time in HH:MM 24-hour form. No plan was made.`
+        : "time_after is later than time_before in the same movie night. No plan was made."], w.label, w.nights);
+    }
     if (after !== undefined || before !== undefined) {
       const bounded = pool.filter((s) => {
         const m = eveningMinutes(s, base.timezone);
@@ -977,15 +1001,8 @@ tool(
       is_wildcard,
       score: r.score,
       why: r.why,
-      // BARE, ON PURPOSE. The hosted planMovieNightData shapes this film
-      // with filmJson(film) and no region slug (tools.ts, the one call site
-      // without one), so a plan's film.url is /film/{slug} on every board —
-      // verified against la-central 2026-09-08. Every other tool scopes the
-      // url to the board; this one mirrors the hosted answer as it is, not
-      // as it should be. When the hosted side threads the slug through, add
-      // `{ region: ... }` here and nowhere else.
-      film: filmShape(films.get(r.screening.filmKey)),
-      showtime: screeningShape(r.screening, venues, { detailed: true }),
+      film: filmShape(films.get(r.screening.filmKey), { region: base.region }),
+      showtime: screeningShape(r.screening, venues, { detailed: true, region: base.region }),
     });
 
     const data = {
@@ -996,6 +1013,7 @@ tool(
       note: discountNote ?? null,
       // The discount fallback is a REAL event a caller may want to surface.
       discounts_relaxed: Boolean(discountNote),
+      warnings: discountNote ? [discountNote] : [],
       plan_count: plans.length,
       plans: plans.map((r) => shape(r, false)),
       wildcard: wildcard ? shape(wildcard, true) : null,
@@ -1012,7 +1030,7 @@ tool(
       L.push(`   ${s.venue.name} · ${s.night_of} · ${s.local_time}${s.tags?.length ? ` [${s.tags.join(", ")}]` : ""}`);
       if (pl.why.length) L.push(`   Why: ${pl.why.join("; ")}`);
       L.push(`   Tickets: ${s.ticket_url}`);
-      L.push(`   Calendar: ${s.calendar_feed}`);
+      L.push(`   Calendar: ${s.calendar_url}`);
       if (detailed) L.push(`   score ${pl.score} · ${s.confidence ?? "?"} · ${s.source_tier ?? "?"} · verified ${s.verified_at ?? "?"}`);
     };
     data.plans.forEach((pl, i) => render(pl, `${i + 1}.`));
@@ -1239,7 +1257,7 @@ tool(
       films: rows.map((r) => ({
         ...filmShape(r.film, { region: base.region }),
         first_night: r.first.nightOf,
-        first_showtime: screeningShape(r.first, venues, { detailed }),
+        first_showtime: screeningShape(r.first, venues, { detailed, region: base.region }),
         opening_venues: r.opening_venues,
       })),
     };
@@ -1405,7 +1423,7 @@ tool(
       screenings_tonight: all.length,
       still_to_come: stillToCome.length,
       next_curtains: next.map((s) => ({
-        ...screeningShape(s, venues, { detailed }),
+        ...screeningShape(s, venues, { detailed, region: base.region }),
         film: filmShape(films.get(s.filmKey), { region: base.region }),
       })),
       sources: {
@@ -1427,7 +1445,7 @@ tool(
       L.push(
         `  ${displayTime(s.startsAt)}${s.nightOf !== tonightNight ? ` (${nightLabel(s.nightOf)})` : ""} ${venues.get(s.venueId)?.short ?? s.venueId} — ${films.get(s.filmKey)?.title ?? s.filmKey}`,
       );
-      L.push(`    ${s.ticketUrl}${detailed ? `  (${s.confidence ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
+      L.push(`    ${screeningShape(s, venues, { region: base.region }).ticket_url}${detailed ? `  (${s.confidence ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
     }
     // The instructions promise this tool names the boards — each id with the
     // place it names, from /api/boards (see boardsList). When the roster is
@@ -1456,13 +1474,17 @@ tool(
   },
   async (args) => {
     const detailed = isDetailed(args);
-    const payload = await accuracyRecord(args.region);
+    const [payload, feed] = await Promise.all([
+      accuracyRecord(args.region), listings(args.region ? { region: args.region } : {}),
+    ]);
+    const base = baseOf(feed);
     // The API's record, picked to the advertised schema rather than passed
     // verbatim: the feed grew a `scope` field (2026-09-08) and verbatim
     // passthrough turned that growth into a validation crash for every
     // client. An explicit pick means the API can evolve without breaking
     // the contract this tool advertises.
     const record = {
+      ...base,
       data_as_of: payload.data_as_of,
       attribution: payload.attribution,
       site: payload.site,
@@ -1500,7 +1522,7 @@ tool(
     // "accuracy record:" suffix — this answer IS the record.
     L.push(
       "",
-      `Full JSON: ${SITE}/api/accuracy · method: ${payload.docs}`,
+      `Full JSON: ${base.accuracy_url} · method: ${payload.docs}`,
       `— Showtimes via SceneF.com, data as of ${payload.data_as_of}`,
     );
     return both(L.join("\n"), record);

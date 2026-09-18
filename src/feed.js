@@ -19,7 +19,8 @@ const BASE = (process.env.SCENEF_BASE_URL || "https://scenef.com").replace(/\/+$
 
 /** Honest identification, per the site's robots contract. */
 export const USER_AGENT = "scenef-mcp-local/1.1";
-export const SITE = BASE;
+// Changing the REST origin for a preview must not change public handoff URLs.
+export const SITE = "https://scenef.com";
 
 // The feed publishes `cache-control: max-age=60` because counts.tonight means
 // "still catchable". Holding it exactly that long means nine tool calls in one
@@ -37,6 +38,7 @@ async function getJson(path) {
   try {
     res = await fetch(`${BASE}${path}`, {
       headers: { accept: "application/json", "user-agent": USER_AGENT },
+      signal: AbortSignal.timeout(15_000),
     });
   } catch (err) {
     throw new Error(

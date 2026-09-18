@@ -24,9 +24,12 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { notableItem } from "../src/tools.js";
 
 const HOSTED = process.env.SCENEF_MCP_URL ?? "https://scenef.com/mcp";
+// Previews can supply a populated nondefault board without skipping coverage.
+const REGIONAL_BOARD = process.env.SCENEF_PARITY_REGION ?? "la-central";
 const SERVER = resolve(dirname(fileURLToPath(import.meta.url)), "..", "server.js");
 
 let failures = 0;
@@ -36,7 +39,7 @@ const check = (ok, label, detail = "") => {
 };
 
 const local = new Client({ name: "scenef-parity", version: "1.0.0" });
-await local.connect(new StdioClientTransport({ command: process.execPath, args: [SERVER] }));
+await local.connect(new StdioClientTransport({ command: process.execPath, args: [SERVER], env: process.env }));
 const mine = (await local.listTools()).tools;
 
 let hosted;
@@ -87,7 +90,8 @@ function tomorrowIn(tz) {
   d.setUTCDate(d.getUTCDate() + 1);
   return d.toISOString().slice(0, 10);
 }
-const TOMORROW = tomorrowIn("America/Los_Angeles");
+const regionalClock = await pair("scenef_now", { region: REGIONAL_BOARD });
+const TOMORROW = tomorrowIn(regionalClock.their.structuredContent?.timezone ?? "America/Los_Angeles");
 
 // ————————————————————————————————————————————— the contract as published
 
@@ -96,6 +100,14 @@ check(mine.length === theirs.length, "same number of tools", `${mine.length} vs 
 
 const names = (xs) => xs.map((t) => t.name).sort().join(", ");
 check(names(mine) === names(theirs), "same tool names", `${names(mine)}\n        ${names(theirs)}`);
+
+// SDK versions differ in their dialect label; these contracts use keywords
+// shared by both. Keep every validation constraint and nested description.
+const normalizeSchema = (value, key) => {
+  if (Array.isArray(value)) return key === "required" ? [...value].sort() : value.map((v) => normalizeSchema(v));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).filter(([k]) => k !== "$schema").map(([k, v]) => [k, normalizeSchema(v, k)]));
+};
 
 for (const t of theirs) {
   const m = mine.find((x) => x.name === t.name);
@@ -125,6 +137,10 @@ for (const t of theirs) {
   }
   const req = (s) => (s?.required ?? []).slice().sort().join(", ");
   check(req(m.inputSchema) === req(t.inputSchema), `${t.name} same required fields`, `${req(m.inputSchema)} vs ${req(t.inputSchema)}`);
+  for (const side of ["inputSchema", "outputSchema"]) {
+    const equal = isDeepStrictEqual(normalizeSchema(m[side]), normalizeSchema(t[side]));
+    check(equal, `${t.name} complete ${side} constraints match`, equal ? "" : "Nested schema drift: refresh the canonical contract and inspect both definitions.");
+  }
 
   for (const hint of ["readOnlyHint", "destructiveHint", "openWorldHint"]) {
     check(m.annotations?.[hint] === t.annotations?.[hint], `${t.name} ${hint} matches`, `${m.annotations?.[hint]} vs ${t.annotations?.[hint]}`);
@@ -163,8 +179,8 @@ const PROBES = [
   // from every board where the hosted server prints /film/{slug}/la-central
   // off a non-default one. Both drifts are visible in this one sentence.
   ["scenef_search_showtimes", { film: "the" }],
-  ["scenef_search_showtimes", { film: "the", region: "la-central" }],
-  ["scenef_film_details", { film: "the", region: "la-central" }],
+  ["scenef_search_showtimes", { film: "the", region: REGIONAL_BOARD }],
+  ["scenef_film_details", { film: "the", region: REGIONAL_BOARD }],
   // THE WHEN GRAMMAR REFUSES "today" — the hosted resolveWhen() accepts
   // tonight, tomorrow, weekend and a date, and answers anything else with
   // one sentence and no window. This server read "today" as tonight.
@@ -174,10 +190,10 @@ const PROBES = [
   // date, this server fetched the night slice and matched against only that
   // night's films, so the candidate list for an ambiguous title depended on
   // the date beside it. The hosted list is the board's.
-  ["scenef_search_showtimes", { film: "the", region: "la-central", date: TOMORROW }],
+  ["scenef_search_showtimes", { film: "the", region: REGIONAL_BOARD, date: TOMORROW }],
   // AN AMBIGUOUS THEATER: the hosted matchVenue() is an either-way substring
   // over id, name and short, capped at eight, in board order.
-  ["scenef_theater_info", { theater: "amc", region: "la-central" }],
+  ["scenef_theater_info", { theater: "amc", region: REGIONAL_BOARD }],
 ];
 
 for (const [name, args] of PROBES) {
@@ -226,7 +242,7 @@ for (const [name, args] of PROBES) {
 //                   "tonight", a theater name reaches every venue it names;
 //   plan            exactly three plans plus a wildcard, each plan's
 //                   screening, score and why[] lines, and the plan film url
-//                   BARE as the hosted server prints it;
+//                   scoped to the selected board;
 //   coming_soon     the first row is the film with the earliest first
 //                   curtain, its opening venues by short name, and the
 //                   horizon runs to a night, not to a millisecond;
@@ -234,7 +250,15 @@ for (const [name, args] of PROBES) {
 //                   substring), and upcoming_count is everything ahead, not
 //                   the five rows shown.
 const same = (...keys) => (s) => Object.fromEntries(keys.map((k) => [k, s?.[k]]));
-const filmRows = (s) => (s?.films ?? []).map((f) => [f.slug, f.venue_count, f.showtime_count]);
+const screeningEvidence = (s) => s ? {
+  screening_id: s.screening_id, ticket_url: s.ticket_url, calendar_url: s.calendar_url,
+  confidence: s.confidence, source_tier: s.source_tier, sources: s.sources, verified_at: s.verified_at,
+  // The calls are separate instants; compare cadence/status, not clock age.
+  freshness: s.freshness ? { status: s.freshness.status, retained: s.freshness.retained,
+    source_status: s.freshness.source_status, stale_after_hours: s.freshness.stale_after_hours } : null,
+} : null;
+const filmRows = (s) => (s?.films ?? []).map((f) => [f.slug, f.venue_count, f.showtime_count,
+  f.showtimes_complete, f.showtimes?.map(screeningEvidence), screeningEvidence(f.next_showtime)]);
 const planRows = (s) => (s?.plans ?? []).map((p) => [p.showtime?.screening_id, p.score, p.why, p.film?.url]);
 const wildcardRow = (s) => (s?.wildcard ? [s.wildcard.showtime?.screening_id, s.wildcard.score, s.wildcard.why, s.wildcard.film?.url] : null);
 const venueCounts = (s) => (s?.venues ?? []).map((v) => [v.venue_id, v.showtimes?.length]);
@@ -242,18 +266,21 @@ const FIELDS = [
   ["scenef_discounts", {}, same("today_dow", "today_name", "applies_today_count")],
   ["scenef_discounts", { region: "oahu" }, same("today_dow", "today_name", "applies_today_count")],
   ["scenef_now", {}, same("night_of", "is_tonight", "screenings_tonight", "still_to_come")],
-  ["scenef_now", { region: "la-central" }, same("night_of", "is_tonight", "screenings_tonight", "still_to_come")],
+  ["scenef_now", { region: REGIONAL_BOARD }, same("night_of", "is_tonight", "screenings_tonight", "still_to_come")],
   ["scenef_now", { region: "oahu" }, same("night_of", "is_tonight", "screenings_tonight", "still_to_come")],
   ["scenef_whats_playing", { max_results: 3 }, (s) => ({ ...same("window", "nights", "film_count")(s), films_returned: s?.films?.length, rows: filmRows(s) })],
-  ["scenef_whats_playing", { max_results: 3, region: "la-central" }, (s) => ({ ...same("window", "nights", "film_count")(s), films_returned: s?.films?.length, rows: filmRows(s) })],
-  ["scenef_whats_playing", { when: "tomorrow", max_results: 3, region: "la-central" }, (s) => ({ ...same("window", "nights", "film_count")(s), rows: filmRows(s) })],
-  ["scenef_whats_playing", { when: "weekend", max_results: 3, region: "la-central" }, (s) => ({ ...same("window", "nights", "film_count")(s), rows: filmRows(s) })],
+  ["scenef_whats_playing", { max_results: 3, region: REGIONAL_BOARD }, (s) => ({ ...same("window", "nights", "film_count")(s), films_returned: s?.films?.length, rows: filmRows(s) })],
+  ["scenef_whats_playing", { when: "tomorrow", max_results: 3, region: REGIONAL_BOARD }, (s) => ({ ...same("window", "nights", "film_count")(s), rows: filmRows(s) })],
+  ["scenef_whats_playing", { when: "weekend", max_results: 3, region: REGIONAL_BOARD }, (s) => ({ ...same("window", "nights", "film_count")(s), rows: filmRows(s) })],
   ["scenef_whats_playing", { when: "today", max_results: 3 }, same("window", "nights", "film_count", "note")],
-  ["scenef_search_showtimes", { venues: ["amc"], region: "la-central", date: "tonight" }, (s) => ({ ...same("matched", "filtered_by", "showtime_count", "unknown_venues", "coverage_note")(s), by_venue: venueCounts(s) })],
-  ["scenef_plan_movie_night", { region: "la-central" }, (s) => ({ ...same("window", "nights", "note", "discounts_relaxed", "plan_count")(s), plans: planRows(s), wildcard: wildcardRow(s) })],
-  ["scenef_plan_movie_night", { region: "la-central", preferences: { likes: ["horror"] } }, (s) => ({ ...same("window", "nights", "plan_count")(s), plans: planRows(s), wildcard: wildcardRow(s) })],
+  ["scenef_search_showtimes", { venues: ["amc"], region: REGIONAL_BOARD, date: "tonight" }, (s) => ({ ...same("matched", "filtered_by", "showtime_count", "unknown_venues", "coverage_note")(s), by_venue: venueCounts(s) })],
+  ["scenef_search_showtimes", { venues: ["amc"], region: REGIONAL_BOARD, date: "2026-02-30" }, same("matched", "showtime_count", "refusal", "warnings")],
+  ["scenef_search_showtimes", { venues: ["amc"], region: REGIONAL_BOARD, time_after: "24:00" }, same("matched", "showtime_count", "refusal", "warnings")],
+  ["scenef_plan_movie_night", { region: REGIONAL_BOARD, preferences: { time_after: "7pm" } }, same("plan_count", "plans", "note", "warnings")],
+  ["scenef_plan_movie_night", { region: REGIONAL_BOARD }, (s) => ({ ...same("window", "nights", "note", "discounts_relaxed", "plan_count")(s), plans: planRows(s), wildcard: wildcardRow(s) })],
+  ["scenef_plan_movie_night", { region: REGIONAL_BOARD, preferences: { likes: ["horror"] } }, (s) => ({ ...same("window", "nights", "plan_count")(s), plans: planRows(s), wildcard: wildcardRow(s) })],
   ["scenef_plan_movie_night", { when: "today" }, same("window", "nights", "note", "plan_count", "plans", "wildcard")],
-  ["scenef_coming_soon", { region: "la-central", horizon_days: 7 }, (s) => ({ ...same("film_count")(s), first_row: s?.films?.[0] ? [s.films[0].slug, s.films[0].first_night, s.films[0].opening_venues] : null })],
+  ["scenef_coming_soon", { region: REGIONAL_BOARD, horizon_days: 7 }, (s) => ({ ...same("film_count")(s), first_row: s?.films?.[0] ? [s.films[0].slug, s.films[0].first_night, s.films[0].opening_venues] : null })],
   ["scenef_theater_info", { theater: "Roxie Theater San Francisco" }, (s) => ({ ...same("matched", "upcoming_count")(s), venue_id: s?.venue?.venue_id })],
 ];
 
@@ -275,12 +302,12 @@ for (const [name, args, fields] of FIELDS) {
 // whole run (54 for Akira on la-central where the hosted server counted the
 // 30 still ahead).
 {
-  const { their: nowLA } = await pair("scenef_now", { region: "la-central" });
+  const { their: nowLA } = await pair("scenef_now", { region: REGIONAL_BOARD });
   const slug = nowLA.structuredContent?.next_curtains?.[0]?.film?.slug;
   if (!slug) {
     console.log("  skip  scenef_search_showtimes by film — the hosted la-central board named no next curtain to search for");
   } else {
-    const args = { film: slug, region: "la-central" };
+    const args = { film: slug, region: REGIONAL_BOARD };
     const key = keyOf("scenef_search_showtimes", args);
     const { their, mine: r } = await pair("scenef_search_showtimes", args);
     const pick = (s) => ({ ...same("matched", "showtime_count")(s), film_url: s?.film?.url, by_venue: venueCounts(s) });
@@ -354,7 +381,7 @@ const keysOf = (o) => Object.keys(o ?? {}).sort().join(", ");
   );
 
   let compared = 0;
-  for (const args of [{ max_results: 3 }, { max_results: 3, region: "la-central" }, { max_results: 25 }]) {
+  for (const args of [{ max_results: 3 }, { max_results: 3, region: REGIONAL_BOARD }, { max_results: 25 }]) {
     const key = keyOf("scenef_whats_playing", args);
     const { their, mine: r } = await pair("scenef_whats_playing", args);
     const mineN = r.structuredContent?.notable ?? [];
@@ -385,8 +412,8 @@ const keysOf = (o) => Object.keys(o ?? {}).sort().join(", ");
 // September 10"). Read as the first line of the answer — the notable lead
 // never rides a window that is not tonight.
 for (const args of [
-  { when: "tomorrow", max_results: 3, region: "la-central" },
-  { when: "weekend", max_results: 3, region: "la-central" },
+  { when: "tomorrow", max_results: 3, region: REGIONAL_BOARD },
+  { when: "weekend", max_results: 3, region: REGIONAL_BOARD },
 ]) {
   const key = keyOf("scenef_whats_playing", args);
   const { their, mine: r } = await pair("scenef_whats_playing", args);
@@ -439,9 +466,9 @@ for (const args of [
 // it. A bare /film/{slug} here sends a Los Angeles reader to San Francisco's
 // showtimes for the film, or to a 404.
 const URL_SHAPE = [
-  ["scenef_whats_playing", { max_results: 3, region: "la-central" }, (s) => s?.films ?? []],
-  ["scenef_coming_soon", { region: "la-central", horizon_days: 7 }, (s) => s?.films ?? []],
-  ["scenef_now", { region: "la-central" }, (s) => (s?.next_curtains ?? []).map((c) => c.film).filter(Boolean)],
+  ["scenef_whats_playing", { max_results: 3, region: REGIONAL_BOARD }, (s) => s?.films ?? []],
+  ["scenef_coming_soon", { region: REGIONAL_BOARD, horizon_days: 7 }, (s) => s?.films ?? []],
+  ["scenef_now", { region: REGIONAL_BOARD }, (s) => (s?.next_curtains ?? []).map((c) => c.film).filter(Boolean)],
 ];
 
 for (const [name, args, films] of URL_SHAPE) {

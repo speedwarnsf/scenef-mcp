@@ -37,7 +37,7 @@ const check = (ok, label, detail = "") => {
 };
 
 const client = new Client({ name: "scenef-contract-test", version: "1.0.0" });
-await client.connect(new StdioClientTransport({ command: process.execPath, args: [SERVER] }));
+await client.connect(new StdioClientTransport({ command: process.execPath, args: [SERVER], env: process.env }));
 
 console.log("handshake");
 const info = client.getServerVersion();
