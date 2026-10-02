@@ -67,6 +67,20 @@ async function pair(name, args) {
     const their = await hosted.callTool({ name, arguments: args });
     const mine = await local.callTool({ name, arguments: args });
     pairs.set(key, { their, mine });
+    // EVERY ANSWER'S KEY SET, on every call this suite makes. The checks
+    // below compare chosen fields of chosen answers; a key the hosted answer
+    // carries and this one drops is a field a caller reads as undefined, and
+    // nothing here would have said so unless someone thought to ask about
+    // that tool. Added 2026-10-01 after a stale checkout dropped `warnings`
+    // from plan answers and the field checks stayed green.
+    const keyset = (r) => Object.keys(r?.structuredContent ?? {}).sort();
+    const H = keyset(their), M = keyset(mine);
+    const onlyH = H.filter((x) => !M.includes(x)), onlyM = M.filter((x) => !H.includes(x));
+    check(
+      !onlyH.length && !onlyM.length,
+      `${name} ${JSON.stringify(args)} structuredContent has the hosted key set`,
+      `only hosted: [${onlyH.join(", ")}] · only local: [${onlyM.join(", ")}]`,
+    );
   }
   return pairs.get(key);
 }
@@ -142,7 +156,7 @@ for (const t of theirs) {
     check(equal, `${t.name} complete ${side} constraints match`, equal ? "" : "Nested schema drift: refresh the canonical contract and inspect both definitions.");
   }
 
-  for (const hint of ["readOnlyHint", "destructiveHint", "openWorldHint"]) {
+  for (const hint of ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]) {
     check(m.annotations?.[hint] === t.annotations?.[hint], `${t.name} ${hint} matches`, `${m.annotations?.[hint]} vs ${t.annotations?.[hint]}`);
   }
 }

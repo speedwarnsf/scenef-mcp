@@ -62,9 +62,13 @@ for (const name of EXPECTED) {
   check(Boolean(t), `${name} present`);
   if (!t) continue;
   check(Boolean(t.description && t.description.length > 80), `${name} carries a real description`);
+  // Every hint explicit and equal to the audited value (2026-10-01). Only the
+  // place lookup is a closed world; the rest describe public cinemas.
+  const closed = name === "scenef_resolve_board";
   check(t.annotations?.readOnlyHint === true, `${name} readOnlyHint`);
   check(t.annotations?.destructiveHint === false, `${name} destructiveHint`);
-  check(t.annotations?.openWorldHint === false, `${name} openWorldHint`);
+  check(t.annotations?.idempotentHint === true, `${name} idempotentHint`);
+  check(t.annotations?.openWorldHint === !closed, `${name} openWorldHint ${!closed}`);
   check(Boolean(t.inputSchema), `${name} publishes an input schema`);
 }
 

@@ -89,26 +89,35 @@ const regionParam = z
   );
 
 /**
- * ALL THREE HINTS, EXPLICITLY, ON EVERY TOOL.
- *
- * The values are facts about these ten tools, not paperwork:
- *   readOnlyHint    true  — every tool reads the board; there is no write
- *                           path anywhere in this server, and the REST client
- *                           issues nothing but GET.
- *   destructiveHint false — nothing is deleted or modified, so there is
- *                           nothing to destroy.
- *   openWorldHint   false — the tools read SceneF's own published feed. They
- *                           do not browse, search the web, or call an
- *                           endpoint whose contents we do not control.
- *
- * Anything that ever is NOT read-only must declare its own annotations rather
- * than reuse this constant.
+ * ALL FOUR HINTS, EXPLICITLY, ON EVERY TOOL — copied from the hosted server,
+ * which is the contract. OpenAI rejected the v1.1.0 listing on 2026-09-30
+ * because openWorldHint was false under ITS definition ("true for public or
+ * open-ended entities, including … arbitrary destinations") and
+ * idempotentHint was absent. Nine tools describe public cinemas and link out
+ * to their box offices: true. scenef_resolve_board looks a place up in
+ * SceneF's own table and returns a region id: false — here that table is
+ * reached over SceneF's REST door, which is still a bounded catalog of ours
+ * ("may use false, even when externally hosted"). No tool writes; repeat
+ * calls change nothing. test/parity.js holds every value to the hosted one.
  */
-const READ_ONLY = {
+const LISTING = {
   readOnlyHint: true,
   destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+};
+
+const CLOSED_LOOKUP = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
   openWorldHint: false,
 };
+
+/** Copied from the hosted server. readOnlyHint is true because the CALL
+ *  records nothing; this says so, and what following a ticket link causes. */
+const TICKET_LINKS =
+  "Read-only: the call records nothing. Ticket links are SceneF redirects that count a click only when a person follows one.";
 
 /** One sentence every tool description can hand to a caller verbatim. */
 export const ACCURACY_CONTRACT =
@@ -296,7 +305,7 @@ tool(
   {
     title: `What's playing in ${SITE_PLACE}`,
     description:
-      `Ranked list of films playing ${SITE_PLACE} theaters in a given window (tonight, tomorrow, the weekend, or a date), with optional genre and format filters. When the window covers tonight, opens with Notable tonight — scarcity facts with evidence (measured seat counts, final nights, lone prints, posted discounts, live elements); lead with those when asked what to see. Each entry carries year, runtime, genres, a one-line hook, venue count, showtime_count, the next showtime, and the film's SceneF url. The full per-showtime rows are in "detailed", or from scenef_search_showtimes scoped to one film or theatre. ${DETAILED_CARRIES_ACCURACY}`,
+      `Ranked list of films playing ${SITE_PLACE} theaters in a given window (tonight, tomorrow, the weekend, or a date), with optional genre and format filters. When the window covers tonight, opens with Notable tonight — scarcity facts with evidence (measured seat counts, final nights, lone prints, posted discounts, live elements); lead with those when asked what to see. Each entry carries year, runtime, genres, a one-line hook, venue count, showtime_count, the next showtime, and the film's SceneF url. The full per-showtime rows are in "detailed", or from scenef_search_showtimes scoped to one film or theatre. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: {
       when: whenParam,
       genres: z.array(z.string()).optional().describe('Genre filters, e.g. ["horror", "comedy"].'),
@@ -315,7 +324,7 @@ tool(
       region: regionParam,
     },
     outputSchema: whatsPlayingOut.shape,
-    annotations: READ_ONLY,
+    annotations: LISTING,
   },
   async (args) => {
     const detailed = isDetailed(args);
@@ -459,7 +468,7 @@ tool(
   {
     title: "Search showtimes for a film",
     description:
-      `Showtimes scoped by FILM or by THEATER — pass at least one. With \`film\`: where that film is playing (title or slug; fuzzy-matched, ambiguous queries return candidates). With \`venues\` and no film: everything on at those theaters, each showtime naming its film. Grouped by theater with local times, tags (35mm/qa/sold-out), the night each show belongs to, and a ticket link per showtime. Optional date and time-window filters apply to both. For the whole board with no film or theater in mind, call scenef_whats_playing instead. ${DETAILED_CARRIES_ACCURACY}`,
+      `Showtimes scoped by FILM or by THEATER — pass at least one. With \`film\`: where that film is playing (title or slug; fuzzy-matched, ambiguous queries return candidates). With \`venues\` and no film: everything on at those theaters, each showtime naming its film. Grouped by theater with local times, tags (35mm/qa/sold-out), the night each show belongs to, and a ticket link per showtime. Optional date and time-window filters apply to both. For the whole board with no film or theater in mind, call scenef_whats_playing instead. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: {
       film: z
         .string()
@@ -483,7 +492,7 @@ tool(
       region: regionParam,
     },
     outputSchema: searchOut.shape,
-    annotations: READ_ONLY,
+    annotations: LISTING,
   },
   async (args) => {
     const detailed = isDetailed(args);
@@ -666,14 +675,14 @@ tool(
   {
     title: "Theater info",
     description:
-      `One theater's card: address, neighborhood, website, ticketing note, structured discounts (label/detail/day), amenities, its next 5 showtimes with ticket links, and its calendar feed url. ${DETAILED_CARRIES_ACCURACY}`,
+      `One theater's card: address, neighborhood, website, ticketing note, structured discounts (label/detail/day), amenities, its next 5 showtimes with ticket links, and its calendar feed url. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: {
       theater: z.string().describe('Theater id or name, e.g. "roxie" or "Balboa Theater".'),
       response_format: responseFormat,
       region: regionParam,
     },
     outputSchema: theaterOut.shape,
-    annotations: READ_ONLY,
+    annotations: LISTING,
   },
   async (args) => {
     const detailed = isDetailed(args);
@@ -742,14 +751,14 @@ tool(
   {
     title: "Film details",
     description:
-      `The full card for one film: title, year, runtime, genres, directors, cast, overview, rating, trailer and poster urls when present, every upcoming showtime with venue/time/ticket link, and a last-night flag when the run is ending. ${DETAILED_CARRIES_ACCURACY}`,
+      `The full card for one film: title, year, runtime, genres, directors, cast, overview, rating, trailer and poster urls when present, every upcoming showtime with venue/time/ticket link, and a last-night flag when the run is ending. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: {
       film: z.string().describe("Film title or SceneF slug."),
       response_format: responseFormat,
       region: regionParam,
     },
     outputSchema: filmDetailsOut.shape,
-    annotations: READ_ONLY,
+    annotations: LISTING,
   },
   async (args) => {
     const detailed = isDetailed(args);
@@ -834,9 +843,9 @@ tool(
 tool(
   "scenef_plan_movie_night",
   {
-    title: "Plan a movie night",
+    title: "Suggest a movie night",
     description:
-      `The concierge: give it a window and a taste profile and it returns 2-4 complete plans — film + specific showtime + theater + why it fits — each with ticket and calendar links, plus one wildcard pick outside the stated genres. Rankings are pure preference-fit; never pay-ranked. ${DETAILED_CARRIES_ACCURACY}`,
+      `Suggests 2-4 movie-night options from a window and a taste profile — film + specific showtime + theater + why it fits — plus one wildcard pick outside the stated genres. It books, reserves and saves nothing; each option carries ticket and calendar links for the person to follow. Rankings are pure preference-fit; never pay-ranked. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: {
       when: whenParam,
       party_size: z.number().int().min(1).optional().describe("How many people are going."),
@@ -879,7 +888,7 @@ tool(
       region: regionParam,
     },
     outputSchema: planOut.shape,
-    annotations: READ_ONLY,
+    annotations: LISTING,
   },
   async (args) => {
     const detailed = isDetailed(args);
@@ -1138,7 +1147,7 @@ tool(
       "Every structured discount across one board's theaters — venue, label, detail, and day-bound days — with the ones that apply today flagged.",
     inputSchema: { response_format: responseFormat, region: regionParam },
     outputSchema: discountsOut.shape,
-    annotations: READ_ONLY,
+    annotations: LISTING,
   },
   async (args) => {
     void args;
@@ -1192,9 +1201,9 @@ tool(
 tool(
   "scenef_coming_soon",
   {
-    title: "Coming soon (on-sale radar)",
+    title: "Coming soon",
     description:
-      `Films whose first screening on this board is more than 48 hours out, sorted by first night — the on-sale radar for runs worth booking early. Configurable horizon. ${DETAILED_CARRIES_ACCURACY}`,
+      `Lists films whose first screening on this board is more than 48 hours out, sorted by first night — runs worth booking early. Configurable horizon. It sets no alert, watch or reminder. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: {
       horizon_days: z
         .number()
@@ -1207,7 +1216,7 @@ tool(
       region: regionParam,
     },
     outputSchema: comingOut.shape,
-    annotations: READ_ONLY,
+    annotations: LISTING,
   },
   async (args) => {
     const detailed = isDetailed(args);
@@ -1303,14 +1312,14 @@ tool(
   {
     title: "Which board covers this place",
     description:
-      "Translate a city, 5-digit ZIP, neighborhood or board alias into the region handle every other tool takes. Returns the board and WHAT matched it. Refuses rather than guessing: an ambiguous name returns candidates (Gainesville is a town in Texas and another in Florida), a place we cover but have not published returns outside_coverage with the nearest published boards, and an unknown string returns unknown with no fallback board. Coordinates are not accepted — this reads names, not locations.",
+      "Translate a city, 5-digit ZIP, neighborhood or board alias into the region handle every other tool takes. Returns the board and WHAT matched it. Refuses rather than guessing: an ambiguous name returns candidates (Hollywood names both the Los Angeles board and the Miami board), a place we cover but have not published returns outside_coverage with the nearest published boards, and an unknown string returns unknown with no fallback board. Coordinates are not accepted — this reads names, not locations. It is an exact lookup in SceneF's own place table: no geocoder and no web search.",
     inputSchema: {
       place: z
         .string()
         .describe('A city ("Pasadena"), a 5-digit ZIP ("94121"), a neighborhood ("the Mission") or a board alias ("the East Bay", "sf").'),
     },
     outputSchema: placeOut.shape,
-    annotations: READ_ONLY,
+    annotations: CLOSED_LOOKUP,
   },
   async (args) => {
     const r = await resolvePlace(args.place);
@@ -1346,10 +1355,10 @@ tool(
   {
     title: "Right now",
     description:
-      `The cheap is-anything-on call: how many screenings tonight, the next 5 curtains across this board with venue/time/film, and dataset freshness per source. ${DETAILED_CARRIES_ACCURACY}`,
+      `The cheap is-anything-on call: how many screenings tonight, the next 5 curtains across this board with venue/time/film, and dataset freshness per source. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: { response_format: responseFormat, region: regionParam },
     outputSchema: nowOut.shape,
-    annotations: READ_ONLY,
+    annotations: LISTING,
   },
   async (args) => {
     const detailed = isDetailed(args);
@@ -1470,7 +1479,7 @@ tool(
     description: `${ACCURACY_CONTRACT} This tool returns that record: the site-wide confidence mix, the counts of verification checks confirmed / missing / unreachable over the record's window (window_days in the payload — 30 days at present) with the pass rate and the exact denominator it was computed from, the same per venue with source tier and last-verified time, and the definitions of every level. Checks that could not run — a bot wall, a client-rendered page — are graded unreachable and excluded from the pass rate rather than counted as passes. Quote these numbers directly; they are recomputed on every call.`,
     inputSchema: { response_format: responseFormat, region: regionParam },
     outputSchema: accuracyOutput.shape,
-    annotations: READ_ONLY,
+    annotations: LISTING,
   },
   async (args) => {
     const detailed = isDetailed(args);
