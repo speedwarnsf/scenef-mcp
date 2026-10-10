@@ -50,7 +50,7 @@ const pkgVersion = JSON.parse(
 ).version;
 check(info?.version === pkgVersion, `version matches package.json (${pkgVersion})`, info?.version);
 check(
-  (client.getInstructions() ?? "").includes("Accuracy is computed, not claimed"),
+  (client.getInstructions() ?? "").includes("the running record of SceneF's own verification checks, failures included, is public at https://scenef.com/api/accuracy"),
   "initialize carries the accuracy contract",
 );
 
@@ -62,14 +62,27 @@ for (const name of EXPECTED) {
   check(Boolean(t), `${name} present`);
   if (!t) continue;
   check(Boolean(t.description && t.description.length > 80), `${name} carries a real description`);
-  // Every hint explicit and equal to the audited value (2026-10-01). Only the
-  // place lookup is a closed world; the rest describe public cinemas.
-  const closed = name === "scenef_resolve_board";
+  // Every hint an explicit boolean and equal to the hosted value. openWorldHint
+  // is true on ALL TEN: the hosted server (1b13eec) moved scenef_resolve_board
+  // to true and deleted the closed-lookup constant — it takes a public place
+  // name, and OpenAI's definition turns on public entities, not on how the
+  // lookup is done. Its scripts/test-directory-ready.ts pins true on every
+  // tool; so does this.
+  for (const hint of ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]) {
+    check(typeof t.annotations?.[hint] === "boolean", `${name} ${hint} is an explicit boolean`);
+  }
   check(t.annotations?.readOnlyHint === true, `${name} readOnlyHint`);
   check(t.annotations?.destructiveHint === false, `${name} destructiveHint`);
   check(t.annotations?.idempotentHint === true, `${name} idempotentHint`);
-  check(t.annotations?.openWorldHint === !closed, `${name} openWorldHint ${!closed}`);
+  check(t.annotations?.openWorldHint === true, `${name} openWorldHint true`);
   check(Boolean(t.inputSchema), `${name} publishes an input schema`);
+  // THE TOOL OBJECT AS HOSTED PUBLISHES IT (server.js createServer): no
+  // `execution` key, which SDK 1.32.1 adds on its own and the hosted tools
+  // do not carry, and every schema labelled 2020-12 as the hosted ones are.
+  check(!("execution" in t), `${name} carries no execution key`, JSON.stringify(t.execution));
+  for (const side of ["inputSchema", "outputSchema"]) {
+    check(t[side]?.$schema === "https://json-schema.org/draft/2020-12/schema", `${name} ${side} is labelled JSON Schema 2020-12`, t[side]?.$schema);
+  }
 }
 
 console.log("\ntools/call — every tool, against the live board");

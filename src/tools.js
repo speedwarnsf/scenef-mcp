@@ -19,9 +19,10 @@ import { z } from "zod/v4";
 import {
   SITE,
   accuracyRecord,
+  boardFeed,
+  edgeStaleness,
   boardsList,
   cityNow,
-  listings,
   liveNight,
   minutesOf,
   night,
@@ -31,11 +32,15 @@ import {
   tonight,
 } from "./feed.js";
 import {
+  DAY_NAMES,
   baseOf,
   both,
   displayTime,
   dowOf,
+  echoInput,
+  edgeStaleNote,
   filmCandidatesText,
+  filmExtras,
   filmShape,
   filmUrl,
   finish,
@@ -43,7 +48,10 @@ import {
   matchVenue,
   nightLabel,
   normText,
+  provDetail,
   screeningShape,
+  shownDiscount,
+  tagBadge,
   theaterCandidatesText,
   venueCard,
   venueHit,
@@ -63,42 +71,67 @@ import {
   whatsPlayingOut,
 } from "./schemas.js";
 
+// ——— BOUNDS ON EVERYTHING A CALLER CAN TYPE ——— the hosted inputs.ts, as
+// written. Misses echo their input, so nothing a caller types is unbounded;
+// the limits sit well above anything a real question needs.
+const TEXT_MAX = 120;
+const LIST_MAX = 10;
+const ITEM_MAX = 80;
+const text = () => z.string().max(TEXT_MAX);
+const list = () => z.array(z.string().max(ITEM_MAX)).max(LIST_MAX);
+
 const responseFormat = z
   .enum(["concise", "detailed"])
   .optional()
   .describe(
-    'Output size. "concise" (default) is tight text plus a structured summary. In whats_playing, each film has the total showtime_count, next_showtime, and a showtimes array containing only that next screening; showtimes_complete says whether the array is exhaustive. "detailed" includes all selected showtime rows with ids, ticket urls, and accuracy metadata. Use scenef_search_showtimes for all times for one film or theatre.',
+    'Output size. "concise" (default) is tight text plus a structured summary. In whats_playing, each film has the total showtime_count, next_showtime, and a showtimes array containing only that next screening; "detailed" adds showtime rows with ids, ticket urls and accuracy metadata, about 200 across the answer. film_details and search_showtimes return the 40 nearest showtimes in "concise" and up to 200 in "detailed". showtime_count is always the total and showtimes_complete says whether the array is all of it; narrow by date or theater for the rest.',
   );
 
-const whenParam = z
-  .string()
+const whenParam = text()
   .optional()
   .describe(
     'When to look: "tonight" (default), "tomorrow", "weekend" (Fri/Sat/Sun of the current week), or a YYYY-MM-DD date.',
   );
 
-// The hosted server's words, verbatim — every tool takes it (ONE CONTRACT,
-// TWO TRANSPORTS, above). The feed refuses an unknown region with a 400
-// naming the valid list, and getJson passes that correction through, so the
-// "error, not a fallback" promise below is the API's own behavior.
-const regionParam = z
-  .string()
+/** The hosted DEFAULT_BOARD and BOARD_SCOPE, resolved. The hosted server
+ *  interpolates them from its region table (DEFAULT_REGION and its name;
+ *  activeRegions().length and siteWhere()); this package has no region
+ *  table, and tools/list must not wait on the network, so they are the
+ *  live values written down. test/parity.js compares every description and
+ *  the instructions verbatim, so the day a board lights or the default
+ *  changes on the hosted side, it goes red here rather than drifting. */
+const DEFAULT_BOARD = '"sf" (San Francisco)';
+const BOARD_SCOPE = "SceneF publishes 56 boards, in California, Florida and Hawaii only";
+
+// The hosted server's words, verbatim — every board-reading tool takes it
+// (ONE CONTRACT, TWO TRANSPORTS, above). The feed refuses an unknown region
+// with a 400, and boardFeed (feed.js) turns that into the hosted sentence,
+// so the "error, not a fallback" promise below is the API's own behavior.
+const regionParam = text()
   .optional()
   .describe(
-    'Which regional board to read, e.g. "sf", "oahu", "sacramento". Omitted means the default board — it is never inferred from where you are. Call scenef_now for the full list; an unknown region is an error, not a fallback.',
+    "Which regional board to read: a board id such as \"sf\", \"oahu\" or \"miami\", not a city name " +
+      "(\"Honolulu\" or \"Chicago\" is rejected). " +
+      `Omitted means ${DEFAULT_BOARD}; it is never inferred from where you are. ` +
+      "For a city, ZIP or neighborhood call scenef_resolve_board first; scenef_now with no region lists every id. " +
+      "An unknown region is an error, not a fallback.",
   );
 
 /**
- * ALL FOUR HINTS, EXPLICITLY, ON EVERY TOOL — copied from the hosted server,
- * which is the contract. OpenAI rejected the v1.1.0 listing on 2026-09-30
- * because openWorldHint was false under ITS definition ("true for public or
- * open-ended entities, including … arbitrary destinations") and
- * idempotentHint was absent. Nine tools describe public cinemas and link out
- * to their box offices: true. scenef_resolve_board looks a place up in
- * SceneF's own table and returns a region id: false — here that table is
- * reached over SceneF's REST door, which is still a bounded catalog of ours
- * ("may use false, even when externally hosted"). No tool writes; repeat
- * calls change nothing. test/parity.js holds every value to the hosted one.
+ * ALL FOUR HINTS, EXPLICITLY, ON EVERY TOOL — AND openWorldHint IS TRUE ON
+ * ALL TEN. Copied from the hosted server, which is the contract. OpenAI
+ * rejected the v1.1.0 listing on 2026-09-30 because openWorldHint was false
+ * under ITS definition ("true for public or open-ended entities, including …
+ * arbitrary destinations") and idempotentHint was absent. Nine tools
+ * describe public cinemas and link out to their box offices. The tenth,
+ * scenef_resolve_board, held out as false for a while: an exact lookup in
+ * SceneF's own place table, no geocoder, no search — still exactly how it
+ * works. But what it takes is a public place name, and the definition turns
+ * on public entities, not on how the lookup is done; claiming an open world
+ * for a closed lookup errs in the safe direction. The hosted server made it
+ * ONE constant and deleted the closed one (1b13eec); so does this file. No
+ * tool writes; repeat calls change nothing. test/parity.js holds every value
+ * to the hosted one, and test/contract.js pins all four.
  */
 const LISTING = {
   readOnlyHint: true,
@@ -107,36 +140,46 @@ const LISTING = {
   openWorldHint: true,
 };
 
-const CLOSED_LOOKUP = {
-  readOnlyHint: true,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false,
-};
+/** What a tool call does and does not cause — the hosted READS_ONLY.
+ *  readOnlyHint is true because the CALL records nothing. */
+const READS_ONLY = "Read-only: the call itself records nothing.";
 
-/** Copied from the hosted server. readOnlyHint is true because the CALL
- *  records nothing; this says so, and what following a ticket link causes. */
-const TICKET_LINKS =
-  "Read-only: the call records nothing. Ticket links are SceneF redirects that count a click only when a person follows one.";
+/** The hosted GO_ROW_FIELDS: what the /go redirect logs when anyone follows a
+ *  ticket link, in a reader's words. The instructions reuse it. */
+export const GO_ROW_FIELDS =
+  "time, the screening with its film and theater, client type, browser family, referring site, link source tag, and whether the showtime was gone; no IP address, cookie or account";
 
-/** One sentence every tool description can hand to a caller verbatim. */
+/** The hosted ticket-link disclosure, on every tool that returns one. */
+const TICKET_LINKS = `${READS_ONLY} SceneF does not sell, hold or book tickets. Ticket links are https://scenef.com/go/{id} redirects to the theater's own site or the ticket seller it uses (a link to a showtime that is gone lands back on SceneF); whoever follows one, a person or a client, is logged once anonymously (${GO_ROW_FIELDS}) and forwarded.`;
+
+/** One sentence the instructions hand to a caller verbatim — the hosted
+ *  ACCURACY_CONTRACT. */
 export const ACCURACY_CONTRACT =
-  "Accuracy is computed, not claimed: every showtime carries a confidence level, a source tier, and a last-verified time, and the running record of our own verification checks — failures included — is public at https://scenef.com/api/accuracy.";
+  "Every showtime carries a confidence level, a source tier and a last-verified time, and the running record of SceneF's own verification checks, failures included, is public at https://scenef.com/api/accuracy (add ?region= for a board).";
 
+// Every emitted screening has the same evidence fields in both modes.
 const DETAILED_CARRIES_ACCURACY =
-  'Every emitted showtime carries confidence, source tier, reporting sources and verified_at. In whats_playing, "concise" gives the total showtime_count and one next screening in showtimes; showtimes_complete identifies a partial array. "detailed" includes the full array.';
+  "Every emitted showtime carries confidence, source tier, reporting sources and verified_at.";
 
 const isDetailed = (args) => args?.response_format === "detailed";
 
-/** The hosted DAY_NAMES, indexed by cityNow().dow (Sunday = 0). */
-const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+/** Upcoming rows a film or a search hands back per call, nearest first — the
+ *  hosted CONCISE_ROW_CAP / DETAILED_ROW_CAP / rowCap(). The total always
+ *  rides alongside as showtime_count, and showtimes_complete says when the
+ *  list was cut. */
+const CONCISE_ROW_CAP = 40;
+const DETAILED_ROW_CAP = 200;
+const rowCap = (detailed) => (detailed ? DETAILED_ROW_CAP : CONCISE_ROW_CAP);
 
-/** The hosted sitePlace(): the states the lit boards sit in, serially —
- *  "California, Florida and Hawaii" while each has a board. It names the
- *  whats_playing title and the search coverage note. The parity test
- *  compares the title verbatim, so a third state lit on the hosted side
- *  goes red here rather than drifting. */
-const SITE_PLACE = "California, Florida and Hawaii";
+/** The sentence a cut list carries, in both renderers — the hosted cutNote(). */
+function cutNote(shown, total, film) {
+  if (shown >= total) return null;
+  return `Showing the nearest ${shown} of ${total} showtimes. Narrow by date or theater for more${film ? ` (scenef_search_showtimes with film "${film.slug}" and date or venues)` : " (date, time_after/time_before or venues)"}.`;
+}
+
+/** "the San Francisco", "the East Bay" — a board's name ready for
+ *  "on … board", the hosted theBoard(). */
+const theBoard = (base) => (/^the /i.test(base.region_name) ? base.region_name : `the ${base.region_name}`);
 
 // —————————————————————————————————————————————————————————— the clock
 //
@@ -183,6 +226,18 @@ function parseHHMM(text) {
   let mins = Number(m[1]) * 60 + Number(m[2]);
   if (mins < 4 * 60) mins += 1440;
   return mins;
+}
+
+/** "35mm", "35mm or 70mm", "35mm, 70mm or 16mm" — the hosted orList(). */
+function orList(xs) {
+  return xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} or ${xs[xs.length - 1]}`;
+}
+
+/** The window as it reads after "in San Francisco" — the hosted
+ *  windowPhrase(): "tonight", "tomorrow, Friday, October 2", "this weekend
+ *  (…)", or "on Friday, October 2". */
+function windowPhrase(label) {
+  return /^(tonight|tomorrow|this weekend)/i.test(label) ? label : `on ${label}`;
 }
 
 function isCalendarDate(value) {
@@ -244,7 +299,7 @@ function resolveWhen(feed, when) {
   return {
     nights: [],
     label: token,
-    error: `Unrecognized "when": "${when}". Use "tonight", "tomorrow", "weekend", or a YYYY-MM-DD date.`,
+    error: `Unrecognized "when": "${echoInput(when)}". Use "tonight", "tomorrow", "weekend", or a YYYY-MM-DD date.`,
   };
 }
 
@@ -262,11 +317,11 @@ function resolveWhen(feed, when) {
  *  (`?? displayTime`, `?? null`) only keep the key present if a feed row
  *  ever omits the field; when it is there the value is the hosted one.
  *  Exported so the parity test can assert the key set without a live fact. */
-export function notableItem(n) {
+export function notableItem(n, tz) {
   return {
     title: n.title,
     venue: n.venue,
-    local_time: n.time ?? displayTime(n.startsAt),
+    local_time: n.time ?? displayTime(n.startsAt, tz),
     night_of: n.nightOf,
     evidence: n.reasons?.[0]?.evidence ?? null,
     ticket_url: n.ticketUrl ?? null,
@@ -284,15 +339,21 @@ function notableFor(feed, nights) {
   return (feed.notable?.items ?? [])
     .filter((n) => nights.includes(n.nightOf))
     .slice(0, NOTABLE_CAP)
-    .map(notableItem);
+    .map((n) => notableItem(n, feed.timezone));
 }
 
-/** First sentence of the overview, as the one-line hook — the hosted hook(). */
-function hook(film) {
-  const o = String(film?.overview ?? "").trim();
-  if (!o) return null;
-  const m = o.match(/^.*?[.!?](?=\s|$)/);
-  return (m ? m[0] : o).trim();
+/** The rows each film carries, from ONE budget shared by both renderers —
+ *  the hosted whatsPlayingRows(). Concise is the next screening only;
+ *  detailed spends about DETAILED_ROW_CAP rows down the ranked list, and
+ *  every film keeps at least its next showtime so the array is never empty. */
+function whatsPlayingRows(entries, detailed) {
+  if (!detailed) return entries.map(({ shows }) => shows.slice(0, 1));
+  let left = DETAILED_ROW_CAP;
+  return entries.map(({ shows }) => {
+    const take = Math.max(1, Math.min(shows.length, left));
+    left = Math.max(0, left - take);
+    return shows.slice(0, take);
+  });
 }
 
 // ——————————————————————————————————————————————————————————— the tools
@@ -303,14 +364,13 @@ const tool = (name, config, handler) => TOOLS.push({ name, config, handler });
 tool(
   "scenef_whats_playing",
   {
-    title: `What's playing in ${SITE_PLACE}`,
+    title: "What's playing",
     description:
-      `Ranked list of films playing ${SITE_PLACE} theaters in a given window (tonight, tomorrow, the weekend, or a date), with optional genre and format filters. When the window covers tonight, opens with Notable tonight — scarcity facts with evidence (measured seat counts, final nights, lone prints, posted discounts, live elements); lead with those when asked what to see. Each entry carries year, runtime, genres, a one-line hook, venue count, showtime_count, the next showtime, and the film's SceneF url. The full per-showtime rows are in "detailed", or from scenef_search_showtimes scoped to one film or theatre. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
+      `Use this when someone asks what is showing in one area tonight, tomorrow, this weekend or on a date. Reads ONE regional board per call; ${BOARD_SCOPE}. Pass region; it defaults to ${DEFAULT_BOARD} when omitted. For a city, ZIP or neighborhood, call scenef_resolve_board first. Returns a ranked list of films, with optional genre and format filters. When the window covers tonight it opens with Notable tonight: scarcity facts with evidence (measured seat counts, final nights, lone prints, posted discounts, live elements). Each entry carries year, runtime, genres, a one-line hook, venue count, showtime_count, the next showtime and the film's SceneF url. "detailed" adds showtime rows, about 200 across the answer; scenef_search_showtimes lists the times for one film or theater. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: {
       when: whenParam,
-      genres: z.array(z.string()).optional().describe('Genre filters, e.g. ["horror", "comedy"].'),
-      formats: z
-        .array(z.string())
+      genres: list().optional().describe('Genre filters, e.g. ["horror", "comedy"].'),
+      formats: list()
         .optional()
         .describe('Format/tag filters, e.g. ["35mm", "70mm", "qa", "live-score"].'),
       max_results: z
@@ -328,7 +388,7 @@ tool(
   },
   async (args) => {
     const detailed = isDetailed(args);
-    const feed = await listings(args.region ? { region: args.region } : {});
+    const feed = await boardFeed(args.region);
     const base = baseOf(feed);
     const venues = venueIndex(feed);
     const films = new Map(feed.films.map((f) => [f.key, f]));
@@ -391,6 +451,8 @@ tool(
       );
     }
 
+    // The rows each film carries, from one budget both renderers read.
+    const rows = whatsPlayingRows(entries, detailed);
     const data = {
       ...base,
       window: w.label,
@@ -402,56 +464,68 @@ tool(
       // already capped at max_results, so film_count is the length of
       // films[].
       film_count: entries.length,
-      films: entries.map(({ film, shows }) => ({
-        ...filmShape(film, { region: base.region }),
-        hook: hook(film),
-        venue_count: new Set(shows.map((s) => s.venueId)).size,
-        showtime_count: shows.length,
-        next_showtime: screeningShape(shows[0], venues, { detailed, region: base.region }),
-        // Older installed definitions require an array in both modes.
-        // The total and completeness flag make a concise sample explicit.
-        showtimes: (detailed ? shows : shows.slice(0, 1)).map((s) => screeningShape(s, venues, { detailed, region: base.region })),
-        showtimes_complete: detailed || shows.length <= 1,
-      })),
+      films: entries.map(({ film, shows }, i) => {
+        // A held film's entry carries no hook key at all — see filmExtras.
+        const extras = filmExtras(film);
+        return {
+          ...filmShape(film, { region: base.region }),
+          ...(extras ? { hook: extras.hook } : {}),
+          venue_count: new Set(shows.map((s) => s.venueId)).size,
+          showtime_count: shows.length,
+          next_showtime: screeningShape(shows[0], venues, { detailed, region: base.region, tz: base.timezone }),
+          // Older installed definitions require an array in both modes.
+          // The total and completeness flag make a partial array explicit.
+          showtimes: rows[i].map((s) => screeningShape(s, venues, { detailed, region: base.region, tz: base.timezone })),
+          showtimes_complete: rows[i].length === shows.length,
+        };
+      }),
     };
 
+    // THE HOSTED whatsPlaying() PROSE, line for line (src/lib/mcp/tools.ts):
+    // the notable lead when the window covers tonight, the header, then each
+    // film on one line — year, runtime and genres in parentheses, how many
+    // venues, the next curtain, the hook — and its film page. Detailed adds
+    // the film key and slug, then each row with its night, tags, ticket link
+    // and accuracy stamp (provDetail).
     const L = [];
     if (notable.length) {
-      // The same five items the JSON carries, each with its one receipt —
-      // the hosted prose also prints reasons[0].evidence and stops at five.
       L.push("Notable tonight — scarcity facts with receipts, not taste:");
-      for (const n of notable) {
-        L.push(`  • ${n.title} — ${n.venue}, ${n.local_time}${n.evidence ? ` (${n.evidence})` : ""}`);
-      }
+      for (const n of notable) L.push(`- ${n.title}, ${n.local_time} at ${n.venue} — ${n.evidence} · ${n.ticket_url}`);
       L.push("");
     }
-    // THE HOSTED HEADER LINE, verbatim. The label already carries the night
-    // for tomorrow and date windows ("tomorrow, Thursday, September 10"),
-    // and this server appended nightLabel again — "tomorrow, Thursday,
-    // September 10, Thursday, September 10".
+    // The label already carries the night for tomorrow and date windows
+    // ("tomorrow, Thursday, September 10"); nothing is appended to it.
     L.push(`Playing ${w.label} — ${entries.length} film${entries.length === 1 ? "" : "s"}:`, "");
-    entries.forEach(({ film: f, shows }, i) => {
-      const venue_count = new Set(shows.map((s) => s.venueId)).size;
-      const facts = [f.year, f.runtimeMin ? `${f.runtimeMin} min` : null, (f.genres ?? []).slice(0, 3).join(", ") || null];
-      L.push(`${String(i + 1).padStart(2)}. ${f.title} — ${facts.filter(Boolean).join(" · ")}`);
-      const first = shows[0];
+    entries.forEach(({ film, shows }, i) => {
+      const venueIds = [...new Set(shows.map((s) => s.venueId))];
+      const next = shows[0];
+      const meta = [
+        film.year ? String(film.year) : undefined,
+        film.runtimeMin ? `${film.runtimeMin} min` : undefined,
+        (film.genres ?? []).length ? film.genres.join(", ") : undefined,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      const h = filmExtras(film)?.hook;
       L.push(
-        `    ${venue_count} theater${venue_count === 1 ? "" : "s"} · ${shows.length} showtime${shows.length === 1 ? "" : "s"} · next ${displayTime(first.startsAt)} at ${venues.get(first.venueId)?.short ?? first.venueId}`,
+        `${i + 1}. ${film.title}${meta ? ` (${meta})` : ""} — ${venueIds.length} venue${venueIds.length === 1 ? "" : "s"}, next ${displayTime(next.startsAt, base.timezone)} at ${venues.get(next.venueId)?.short ?? next.venueId}${h ? ` — ${h}` : ""}`,
       );
-      const h = hook(f);
-      if (h) L.push(`    ${h}`);
+      L.push(`   ${filmUrl(film.slug, base.region)}`);
       if (detailed) {
-        for (const s of shows.slice(0, 8)) {
-          const v = venues.get(s.venueId);
+        L.push(`   film key: ${film.key} · slug: ${film.slug}`);
+        rows[i].forEach((s, j) => {
+          const row = data.films[i].showtimes[j];
           L.push(
-            `      ${displayTime(s.startsAt)} ${v?.short ?? s.venueId}${s.tags?.length ? ` [${s.tags.join(", ")}]` : ""} — ${screeningShape(s, venues, { region: base.region }).ticket_url} (${s.confidence ?? "?"}, verified ${s.verified_at ?? "?"})`,
+            `   - ${nightLabel(s.nightOf)} · ${displayTime(s.startsAt, base.timezone)} at ${venues.get(s.venueId)?.short ?? s.venueId}${tagBadge(s)} · ${row.ticket_url}`,
           );
+          L.push(`     ${provDetail(row)}`);
+        });
+        if (rows[i].length < shows.length) {
+          L.push(`   (+${shows.length - rows[i].length} more — scenef_search_showtimes with film "${film.slug}" and a date or theater lists them)`);
         }
-        if (shows.length > 8) L.push(`      …${shows.length - 8} more`);
       }
-      L.push(`    ${filmUrl(f.slug, base.region)}`);
     });
-    return both(finish(data, L), data);
+    return both(finish(base, L), data);
   },
 );
 
@@ -466,12 +540,11 @@ const NEITHER =
 tool(
   "scenef_search_showtimes",
   {
-    title: "Search showtimes for a film",
+    title: "Search showtimes by film or theater",
     description:
-      `Showtimes scoped by FILM or by THEATER — pass at least one. With \`film\`: where that film is playing (title or slug; fuzzy-matched, ambiguous queries return candidates). With \`venues\` and no film: everything on at those theaters, each showtime naming its film. Grouped by theater with local times, tags (35mm/qa/sold-out), the night each show belongs to, and a ticket link per showtime. Optional date and time-window filters apply to both. For the whole board with no film or theater in mind, call scenef_whats_playing instead. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
+      `Showtimes scoped by FILM or by THEATER on one board — pass at least one. With \`film\`: where that film is playing (title or slug; fuzzy-matched, ambiguous queries return candidates). With \`venues\` and no film: everything on at those theaters, each showtime naming its film. Grouped by theater with local times, tags (35mm/qa/sold-out), the night each show belongs to, and a ticket link per showtime. Optional date and time-window filters apply to both. Returns the 40 nearest showtimes ("concise") or up to 200 ("detailed"); showtime_count is the total and showtimes_complete says whether the list is whole, so narrow by date or theater for the rest. For the whole board with no film or theater in mind, call scenef_whats_playing instead. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: {
-      film: z
-        .string()
+      film: text()
         .optional()
         .describe(
           "Film title, or a SceneF slug taken from films[].slug / scenef_whats_playing. " +
@@ -479,11 +552,10 @@ tool(
             "scenef_whats_playing, so guessing is safe but browsing is faster. " +
             "Optional when `venues` is given — omit it to ask what is on at a theater.",
         ),
-      date: z.string().optional().describe("Restrict to one night, YYYY-MM-DD."),
-      time_after: z.string().optional().describe('Only shows at or after this local time, "HH:MM" 24h.'),
-      time_before: z.string().optional().describe('Only shows at or before this local time, "HH:MM" 24h.'),
-      venues: z
-        .array(z.string())
+      date: text().optional().describe("Restrict to one night, YYYY-MM-DD."),
+      time_after: text().optional().describe('Only shows at or after this local time, "HH:MM" 24h.'),
+      time_before: text().optional().describe('Only shows at or before this local time, "HH:MM" 24h.'),
+      venues: list()
         .optional()
         .describe(
           'Restrict to these theaters (ids or names), e.g. ["roxie", "Balboa"]. ' + "Required when `film` is omitted.",
@@ -503,7 +575,7 @@ tool(
     // different candidates depending on the date beside it. The hosted
     // server matches the film over the board and only then narrows the
     // screenings to the night and the hours asked for.
-    const feed = await listings(args.region ? { region: args.region } : {});
+    const feed = await boardFeed(args.region);
     const venues = venueIndex(feed);
     const films = new Map(feed.films.map((f) => [f.key, f]));
     const base = baseOf(feed);
@@ -530,6 +602,10 @@ tool(
         refusal,
         candidates: [],
         showtime_count: 0,
+        // Present on every search answer (hosted searchShowtimesData): a
+        // refusal ran no search, so showtimes_complete is absent and the
+        // note is null.
+        note: null,
         venues: [],
         unknown_venues: [],
         coverage_note: null,
@@ -553,6 +629,7 @@ tool(
           unknown_venues: [],
           coverage_note: null,
           showtime_count: 0,
+          note: null,
           venues: [],
         });
       }
@@ -576,14 +653,14 @@ tool(
       const spoken = { tonight: today, today, tomorrow: shiftDate(today, 1) };
       const resolved = isCalendarDate(raw) ? raw : spoken[raw.toLowerCase()];
       if (resolved) shows = shows.filter((s) => s.nightOf === resolved);
-      else unusable.push(`date="${raw}" is not a night I can read — use YYYY-MM-DD, or "tonight"/"tomorrow"`);
+      else unusable.push(`date="${echoInput(raw)}" is not a night I can read — use YYYY-MM-DD, or "tonight"/"tomorrow"`);
     }
     const after = parseHHMM(args.time_after);
     const before = parseHHMM(args.time_before);
     if (after !== undefined) shows = shows.filter((s) => eveningMinutes(s, base.timezone) >= after);
-    else if (args.time_after !== undefined) unusable.push(`time_after="${args.time_after}" is not a time I can read — use "HH:MM" on a 24-hour clock`);
+    else if (args.time_after !== undefined) unusable.push(`time_after="${echoInput(args.time_after)}" is not a time I can read — use "HH:MM" on a 24-hour clock`);
     if (before !== undefined) shows = shows.filter((s) => eveningMinutes(s, base.timezone) <= before);
-    else if (args.time_before !== undefined) unusable.push(`time_before="${args.time_before}" is not a time I can read — use "HH:MM" on a 24-hour clock`);
+    else if (args.time_before !== undefined) unusable.push(`time_before="${echoInput(args.time_before)}" is not a time I can read — use "HH:MM" on a 24-hour clock`);
     if (after !== undefined && before !== undefined && after > before)
       unusable.push("time_after is later than time_before in the same movie night");
     if (unusable.length) {
@@ -591,14 +668,15 @@ tool(
       return both(finish(base, [refusal]), {
         ...base, query: args.film ?? null, matched: false,
         filtered_by: film ? "film" : "venue", refusal, warnings: unusable,
-        candidates: [], showtime_count: 0, venues: [], unknown_venues: [], coverage_note: null,
+        candidates: [], showtime_count: 0, note: null, venues: [], unknown_venues: [], coverage_note: null,
       });
     }
 
-    // Theaters: every asked name is an either-way substring test against
-    // each venue's id, name and short name, and a name can reach SEVERAL
-    // venues ("amc" is both AMCs). A name that reaches none is a coverage
-    // boundary, named in unknown_venues and the note, never an empty result.
+    // Theaters: every asked name is tested with namesOverlap (shape.js)
+    // against each venue's id, name and short name, and a name can reach
+    // SEVERAL venues ("amc" is both AMCs). A name that reaches none is a
+    // coverage boundary, named in unknown_venues and the note, never an
+    // empty result.
     const unknown_venues = [];
     if (askedVenues.length) {
       const wanted = askedVenues.map((v) => normText(v));
@@ -611,13 +689,19 @@ tool(
       });
     }
 
-    const title = film ? `${film.title}${film.year ? ` (${film.year})` : ""}` : askedVenues.join(", ");
+    const title = film ? `${film.title}${film.year ? ` (${film.year})` : ""}` : askedVenues.map((v) => echoInput(v)).join(", ");
+    // Named as THIS board's boundary — the hosted coverageNote, verbatim.
     const coverage_note = unknown_venues.length
-      ? `Note: ${unknown_venues.map((v) => `"${v}"`).join(", ")} ${unknown_venues.length === 1 ? "is not a covered venue" : "are not covered venues"} — SceneF covers ${SITE_PLACE} theaters only (${feed.venues.map((v) => v.id).join(", ")}). Absence here says nothing about that theater.`
+      ? `Note: ${unknown_venues.map((v) => `"${echoInput(v)}"`).join(", ")} ${unknown_venues.length === 1 ? "is not a theater" : "are not theaters"} on ${theBoard(base)} board (${feed.venues.map((v) => v.id).join(", ")}). Absence here says nothing about that theater.`
       : null;
 
+    // THE ROWS HANDED BACK are the nearest rowCap() of every match — the
+    // hosted searchShowtimesSelect(). showtime_count stays the total, and
+    // both renderers group the ROWS, never all the shows.
+    const rows = shows.slice(0, rowCap(detailed));
+    const cut = cutNote(rows.length, shows.length, film);
     const grouped = new Map();
-    for (const s of shows) {
+    for (const s of rows) {
       if (!grouped.has(s.venueId)) grouped.set(s.venueId, []);
       grouped.get(s.venueId).push(s);
     }
@@ -636,10 +720,12 @@ tool(
       unknown_venues,
       coverage_note,
       showtime_count: shows.length,
+      showtimes_complete: rows.length === shows.length,
+      note: cut,
       venues: [...grouped.entries()].map(([id, list]) => ({
         ...venueShape(venues.get(id) ?? { id, name: id, short: id }),
         showtimes: list.map((s) => ({
-          ...screeningShape(s, venues, { detailed, region: base.region }),
+          ...screeningShape(s, venues, { detailed, region: base.region, tz: base.timezone }),
           ...(venueMode ? { film: filmShape(films.get(s.filmKey), { region: base.region }) } : {}),
         })),
       })),
@@ -654,18 +740,33 @@ tool(
       if (film) L.push(`Film page: ${filmUrl(film.slug, base.region)}`);
       return both(finish(base, L), data);
     }
+    // THE HOSTED searchShowtimes() PROSE, line for line: the coverage
+    // boundary, the heading, the cut note, then each theater and its rows —
+    // night, time, the film in venue mode (there the film is the answer),
+    // tags and the ticket link. Detailed adds the screening id, its night,
+    // the price note when the feed carries one, the calendar link, and the
+    // accuracy stamp.
     if (coverage_note) L.push(coverage_note);
-    L.push(`${title} — ${shows.length} showtime${shows.length === 1 ? "" : "s"}`);
-    for (const [id, list] of grouped) {
+    L.push(film ? `Showtimes for ${title} · ${filmUrl(film.slug, base.region)}` : `What's on at ${title}`);
+    if (cut) L.push(cut);
+    L.push("");
+    [...grouped.entries()].forEach(([id, list], g) => {
+      const shaped = data.venues[g].showtimes;
       const v = venues.get(id);
-      L.push("", `${v?.name ?? id}${v?.neighborhood ? ` · ${v.neighborhood}` : ""}`);
-      for (const s of list) {
-        const bits = [displayTime(s.startsAt), venueMode ? films.get(s.filmKey)?.title ?? "" : ""].filter(Boolean);
-        const tags = s.tags?.length ? ` [${s.tags.join(", ")}]` : "";
-        L.push(`  ${bits.join(" — ")}${tags}  ${s.nightOf}`);
-        L.push(`    ${screeningShape(s, venues, { region: base.region }).ticket_url}${detailed ? `  (${s.confidence ?? "?"} · ${s.source_tier ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
-      }
-    }
+      L.push(`${v?.name ?? id}${v ? ` (${v.neighborhood})` : ""}:`);
+      list.forEach((s, j) => {
+        const row = shaped[j];
+        const f = film ? undefined : films.get(s.filmKey);
+        L.push(
+          `- ${nightLabel(s.nightOf)} · ${displayTime(s.startsAt, base.timezone)}${f ? ` · ${f.title}${f.year ? ` (${f.year})` : ""}` : ""}${tagBadge(s)} · ${row.ticket_url}`,
+        );
+        if (detailed) {
+          L.push(`  screening ${s.id} · night ${s.nightOf}${s.priceNote ? ` · ${s.priceNote}` : ""} · calendar: ${row.calendar_url}`);
+          L.push(`  ${provDetail(row)}`);
+        }
+      });
+      L.push("");
+    });
     return both(finish(base, L), data);
   },
 );
@@ -675,9 +776,9 @@ tool(
   {
     title: "Theater info",
     description:
-      `One theater's card: address, neighborhood, website, ticketing note, structured discounts (label/detail/day), amenities, its next 5 showtimes with ticket links, and its calendar feed url. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
+      `One theater's card: address, neighborhood, website, ticketing note, structured discounts (label/detail/day; membership and discount-card pricing reads "Member pricing; see the theater"), amenities, its next 5 showtimes with ticket links, and its calendar feed url. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: {
-      theater: z.string().describe('Theater id or name, e.g. "roxie" or "Balboa Theater".'),
+      theater: text().describe('Theater id or name, e.g. "roxie" or "Balboa Theater".'),
       response_format: responseFormat,
       region: regionParam,
     },
@@ -686,7 +787,7 @@ tool(
   },
   async (args) => {
     const detailed = isDetailed(args);
-    const feed = await listings(args.region ? { region: args.region } : {});
+    const feed = await boardFeed(args.region);
     const base = baseOf(feed);
     const { venue, candidates } = matchVenue(feed, args.theater);
 
@@ -718,30 +819,43 @@ tool(
       venue: card,
       upcoming_count: next.length,
       upcoming: shown.map((s) => ({
-        ...screeningShape(s, venues, { detailed, region: base.region }),
+        ...screeningShape(s, venues, { detailed, region: base.region, tz: base.timezone }),
         film: filmShape(films.get(s.filmKey), { region: base.region }),
+        film_key: s.filmKey,
       })),
     };
 
-    const L = [`${venue.name}${venue.neighborhood ? ` · ${venue.neighborhood}` : ""}`];
-    if (card.address) L.push(card.address);
-    if (card.website) L.push(card.website);
-    if (card.ticketing_note) L.push(`Ticketing: ${card.ticketing_note}`);
-    if (card.preshow_min) L.push(`Advertised start runs about ${card.preshow_min} min before the feature.`);
-    if (card.amenities.length) L.push(`Amenities: ${card.amenities.join(", ")}`);
-    if (card.nonprofit?.org) L.push(`Nonprofit: ${card.nonprofit.org}${card.nonprofit.url ? ` — ${card.nonprofit.url}` : ""}`);
-    if (card.discounts.length) {
+    // THE HOSTED theaterInfo() PROSE, line for line: the house and its
+    // neighborhood, address, website, ticketing, amenities, the preshow, the
+    // discounts (membership and card pricing through shownDiscount), then the
+    // next five showtimes — night, time, film, tags, ticket link — and the
+    // calendar feed. Detailed adds each row's accuracy stamp and the venue's
+    // id, platform and position. The street address stands alone: venue
+    // records carry no city, and lat/lng ride in the structured card.
+    const L = [`${venue.name} — ${venue.neighborhood}`, `Address: ${venue.address}`, `Website: ${venue.website}`];
+    if (venue.ticketingNote) L.push(`Ticketing: ${venue.ticketingNote}`);
+    if (venue.amenities?.length) L.push(`Amenities: ${venue.amenities.join(", ")}`);
+    if (venue.preshowMin) L.push(`Preshow: ~${venue.preshowMin} min of trailers before the feature`);
+    if ((venue.discounts ?? []).length) {
       L.push("", "Discounts:");
-      for (const d of card.discounts) L.push(`  • ${d.label} — ${d.detail}${d.day !== null ? ` (day ${d.day})` : ""}`);
+      for (const disc of venue.discounts) {
+        const day = disc.day !== undefined && disc.day !== null ? ` (${DAY_NAMES[disc.day]}s)` : "";
+        const shownDisc = shownDiscount(disc);
+        L.push(`- ${shownDisc.label}${day}: ${shownDisc.detail}`);
+      }
     }
-    L.push("", `Next ${shown.length} showtime${shown.length === 1 ? "" : "s"}:`);
-    if (!shown.length) L.push("  Nothing further on the board for this theater.");
-    for (const s of shown) {
-      L.push(`  ${s.nightOf} ${displayTime(s.startsAt)} — ${films.get(s.filmKey)?.title ?? s.filmKey}`);
-      L.push(`    ${screeningShape(s, venues, { region: base.region }).ticket_url}${detailed ? `  (${s.confidence ?? "?"} · ${s.source_tier ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
-    }
-    if (next.length > 5) L.push(`  (${next.length} upcoming in total)`);
+    L.push("", `Next ${Math.min(5, next.length) || 0} showtimes:`);
+    if (!next.length) L.push("- Nothing currently listed.");
+    shown.forEach((s, i) => {
+      const row = data.upcoming[i];
+      L.push(
+        `- ${nightLabel(s.nightOf)} · ${displayTime(s.startsAt, base.timezone)} — ${films.get(s.filmKey)?.title ?? s.filmKey}${tagBadge(s)} · ${row.ticket_url}`,
+      );
+      if (detailed) L.push(`  ${provDetail(row)}`);
+    });
+    if (next.length > 5) L.push(`(${next.length} upcoming in total)`);
     L.push("", `Calendar feed: ${card.calendar_feed}`);
+    if (detailed) L.push(`venue id: ${venue.id} · platform: ${venue.platform} · lat/lng: ${venue.lat}, ${venue.lng}`);
     return both(finish(base, L), data);
   },
 );
@@ -751,9 +865,9 @@ tool(
   {
     title: "Film details",
     description:
-      `The full card for one film: title, year, runtime, genres, directors, cast, overview, rating, trailer and poster urls when present, every upcoming showtime with venue/time/ticket link, and a last-night flag when the run is ending. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
+      `The card for one film on one board: title, year, runtime, genres, directors, cast, overview, rating, a trailer url and a TMDB poster url when present, its upcoming showtimes nearest first with venue/time/ticket link, and a last-night flag when the run is ending. Returns the 40 nearest showtimes ("concise") or up to 200 ("detailed"); showtime_count is the total and showtimes_complete says whether the list is whole — scenef_search_showtimes with a date or theater narrows the rest. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: {
-      film: z.string().describe("Film title or SceneF slug."),
+      film: text().describe("Film title or SceneF slug."),
       response_format: responseFormat,
       region: regionParam,
     },
@@ -762,7 +876,7 @@ tool(
   },
   async (args) => {
     const detailed = isDetailed(args);
-    const feed = await listings(args.region ? { region: args.region } : {});
+    const feed = await boardFeed(args.region);
     const base = baseOf(feed);
     const { film, candidates } = matchFilm(feed, args.film);
 
@@ -801,7 +915,14 @@ tool(
     // one night; the hosted server compares the last night to the live one.
     const today = liveNight(Date.now(), base.timezone).night;
 
+    // The nearest rowCap() of the upcoming showtimes — the hosted
+    // filmDetailsData. showtime_count stays the total.
+    const rows = showtimes.slice(0, rowCap(detailed));
+    const cut = cutNote(rows.length, showtimes.length, film);
+    // The card, and the prose below, reach the synopsis and the art only
+    // through filmExtras: a held film's card omits them (shape.js).
     const card = filmShape(film, { full: true, region: base.region });
+    const x = filmExtras(film);
     const data = {
       ...base,
       query: args.film,
@@ -810,32 +931,47 @@ tool(
       final_night,
       is_last_night: showtimes.length > 0 && final_night === today,
       showtime_count: showtimes.length,
-      showtimes: showtimes.map((s) => screeningShape(s, venues, { detailed, region: base.region })),
+      showtimes_complete: rows.length === showtimes.length,
+      note: cut,
+      showtimes: rows.map((s) => screeningShape(s, venues, { detailed, region: base.region, tz: base.timezone })),
     };
 
+    // THE HOSTED filmDetails() PROSE, line for line: title, the facts line,
+    // director, the first six of the cast, the synopsis (only through
+    // filmExtras — a held film has none), the film page, trailer and poster,
+    // then the run: the LAST NIGHT banner or the final night, the count, the
+    // cut note and the rows — night, time, the house, tags, ticket link.
+    // Detailed adds each row's screening id, calendar link and accuracy stamp.
     const L = [`${film.title}${film.year ? ` (${film.year})` : ""}`];
-    const facts = [
-      film.runtimeMin ? `${film.runtimeMin} min` : null,
-      film.mpaa || null,
-      (film.genres ?? []).join(", ") || null,
+    const meta = [
+      film.runtimeMin ? `${film.runtimeMin} min` : undefined,
+      film.mpaa,
+      (film.genres ?? []).length ? film.genres.join(", ") : undefined,
+      film.ratings?.tmdb ? `TMDB ${film.ratings.tmdb.toFixed(1)}/10` : undefined,
     ].filter(Boolean);
-    if (facts.length) L.push(facts.join(" · "));
+    if (meta.length) L.push(meta.join(" · "));
     if (film.directors?.length) L.push(`Directed by ${film.directors.join(", ")}`);
-    if (film.cast?.length) L.push(`With ${film.cast.slice(0, 5).join(", ")}`);
-    if (film.overview) L.push("", film.overview);
-    if (card.trailer_url) L.push("", `Trailer: ${card.trailer_url}`);
-    if (data.is_last_night) L.push("", "LAST NIGHT — this run ends tonight.");
+    if (film.cast?.length) L.push(`Cast: ${film.cast.slice(0, 6).join(", ")}`);
+    if (x?.overview) L.push("", x.overview);
+    L.push("", `Film page: ${card.url}`);
+    if (x?.trailer_url) L.push(`Trailer: ${x.trailer_url}`);
+    if (x?.poster_url) L.push(`Poster: ${x.poster_url}`);
+    L.push("");
     if (!showtimes.length) {
-      L.push("", final_night ? `No upcoming screenings — last played ${nightLabel(final_night)}.` : "No screenings on the books.");
+      L.push(final_night ? `No upcoming screenings — last played ${nightLabel(final_night)}.` : `No screenings on the books.`);
     } else {
-      L.push("", `${showtimes.length} upcoming showtime${showtimes.length === 1 ? "" : "s"}${final_night ? `, through ${nightLabel(final_night)}` : ""}:`);
+      if (final_night === today) L.push(`LAST NIGHT — tonight is this film's final night in the listings.`);
+      else if (final_night) L.push(`Final night in the listings: ${nightLabel(final_night)}.`);
+      L.push(`Upcoming showtimes (${showtimes.length}):`);
+      if (cut) L.push(cut);
+      rows.forEach((s, i) => {
+        const row = data.showtimes[i];
+        L.push(
+          `- ${nightLabel(s.nightOf)} · ${displayTime(s.startsAt, base.timezone)} at ${venues.get(s.venueId)?.short ?? s.venueId}${tagBadge(s)} · ${row.ticket_url}`,
+        );
+        if (detailed) L.push(`  screening ${s.id} · calendar: ${row.calendar_url} · ${provDetail(row)}`);
+      });
     }
-    for (const s of showtimes.slice(0, 40)) {
-      const v = venues.get(s.venueId);
-      L.push(`  ${s.nightOf} ${displayTime(s.startsAt)} — ${v?.name ?? s.venueId}${s.tags?.length ? ` [${s.tags.join(", ")}]` : ""}`);
-      L.push(`    ${screeningShape(s, venues, { region: base.region }).ticket_url}${detailed ? `  (${s.confidence ?? "?"} · ${s.source_tier ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
-    }
-    L.push("", card.url);
     return both(finish(base, L), data);
   },
 );
@@ -845,14 +981,22 @@ tool(
   {
     title: "Suggest a movie night",
     description:
-      `Suggests 2-4 movie-night options from a window and a taste profile — film + specific showtime + theater + why it fits — plus one wildcard pick outside the stated genres. It books, reserves and saves nothing; each option carries ticket and calendar links for the person to follow. Rankings are pure preference-fit; never pay-ranked. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
+      `Suggests 2-4 movie-night options on one board from a window and a taste profile — film + specific showtime + theater + why it fits — plus one wildcard: the highest-ranked film outside the stated genres, or the next film down when no genre is stated. time_after/time_before are hard bounds; genres and formats only tilt the ranking, and when one matches nothing in the window the answer opens with a warning (also in warnings[]) saying so. It books, reserves and saves nothing; each option carries ticket and calendar links for the person to follow. Ranking uses only the stated preferences; no theater or film pays for placement. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: {
       when: whenParam,
-      party_size: z.number().int().min(1).optional().describe("How many people are going."),
+      party_size: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .optional()
+        .describe("How many people are going (1-20). It labels the plan; it does not change which shows are picked."),
       preferences: z
         .object({
-          likes: z.array(z.string()).optional().describe('Genres to favor, e.g. ["horror", "comedy"].'),
-          avoids: z.array(z.string()).optional().describe("Genres to steer away from."),
+          likes: list()
+            .optional()
+            .describe('Genres to favor, e.g. ["horror", "comedy"]. If no film in the window matches, the plan says so in warnings.'),
+          avoids: list().optional().describe("Genres to steer away from."),
           window: z
             .enum(["matinee", "early", "evening", "late"])
             .optional()
@@ -860,8 +1004,7 @@ tool(
               "Preferred start-time window — a soft tilt. For a time you " +
                 "genuinely cannot make, use time_after/time_before instead.",
             ),
-          time_after: z
-            .string()
+          time_after: text()
             .optional()
             .describe(
               'HARD earliest start, "HH:MM" local 24h, e.g. "20:00" for ' +
@@ -869,10 +1012,12 @@ tool(
                 "degrade: if nothing starts that late the tool says so rather than " +
                 "ranking a show you cannot get to.",
             ),
-          time_before: z.string().optional().describe('HARD latest start, "HH:MM" local 24h. Same no-fallback rule.'),
+          time_before: text().optional().describe('HARD latest start, "HH:MM" local 24h. Same no-fallback rule.'),
           no_matinee: z.boolean().optional().describe("Penalize daytime shows."),
-          formats: z.array(z.string()).optional().describe('Formats to favor, e.g. ["35mm", "70mm"].'),
-          home_venues: z.array(z.string()).optional().describe('Home-theater venue ids to nudge upward, e.g. ["roxie"].'),
+          formats: list()
+            .optional()
+            .describe('Formats to favor, e.g. ["35mm", "70mm"]. If none in the window matches, the plan says so in warnings.'),
+          home_venues: list().optional().describe('Home-theater venue ids to nudge upward, e.g. ["roxie"].'),
           discounts_only: z
             .boolean()
             .optional()
@@ -892,7 +1037,7 @@ tool(
   },
   async (args) => {
     const detailed = isDetailed(args);
-    const feed = await listings(args.region ? { region: args.region } : {});
+    const feed = await boardFeed(args.region);
     const base = baseOf(feed);
     const venues = venueIndex(feed);
     const films = new Map(feed.films.map((f) => [f.key, f]));
@@ -983,6 +1128,28 @@ tool(
       );
     }
 
+    // ——— A PREFERENCE NOTHING MEETS IS SAID, NOT SWALLOWED ——— the hosted
+    // planMovieNightSelect(), as written. Formats and genres are soft tilts,
+    // so the picks stand, but a caller who asked for 35mm is told there was
+    // none before reading a single pick — in the text and in warnings[].
+    // Checked PER ITEM, against the pool AFTER the hard bounds and the
+    // discount filter: a 35mm print at 4pm is not one a 7pm caller can reach.
+    const prefWarnings = [];
+    const where = `in ${feed.region_name ?? "this board"} ${windowPhrase(w.label)}${after !== undefined || before !== undefined ? " within the times you gave" : ""}${prefs.discountsOnly && !discountNote ? " at a theater with a discount that night" : ""}`;
+    // The caller's own words go back into the sentence, so each is clipped.
+    const said = (xs) => orList(xs.map((x) => echoInput(x, 40)));
+    const absentFormats = (prefs.formats ?? []).filter((f) => !pool.some((s) => (s.tags ?? []).includes(f)));
+    if (absentFormats.length) {
+      const f = said(absentFormats);
+      prefWarnings.push(`No ${f} screening ${where}; these picks are not ${f}.`);
+    }
+    const genresOnBoard = new Set(pool.flatMap((s) => (films.get(s.filmKey)?.genres ?? []).map((g) => g.toLowerCase())));
+    const absentGenres = (prefs.likes ?? []).filter((g) => !genresOnBoard.has(g));
+    if (absentGenres.length) {
+      const g = said(absentGenres);
+      prefWarnings.push(`No ${g} film ${where}; these picks are outside ${absentGenres.length === 1 ? "that genre" : "those genres"}.`);
+    }
+
     const ranked = rankForPrefs(films, pool, prefs);
 
     // Best screening per film, in rank order.
@@ -1006,46 +1173,104 @@ tool(
         return likes.length ? !genres.some((g) => likes.includes(g)) : true;
       }) ?? null;
 
+    // `detailed: true` in BOTH modes, on purpose: a plan's showtime has
+    // always carried this package's `calendar_feed` key (the old plan text
+    // printed it), and test/reliability.js pins it on a concise plan. It is
+    // the one local-only key on a concise answer — an alias of calendar_url,
+    // which the hosted row carries too; the hosted output schema admits it.
     const shape = (r, is_wildcard) => ({
       is_wildcard,
       score: r.score,
       why: r.why,
       film: filmShape(films.get(r.screening.filmKey), { region: base.region }),
-      showtime: screeningShape(r.screening, venues, { detailed: true, region: base.region }),
+      showtime: screeningShape(r.screening, venues, { detailed: true, region: base.region, tz: base.timezone }),
     });
 
+    // The preference warnings, then the discount fallback — the hosted
+    // planMovieNightData composition. Both are REAL events a caller may
+    // want to surface.
+    const notes = [...prefWarnings, ...(discountNote ? [discountNote] : [])];
     const data = {
       ...base,
       window: w.label,
       nights: w.nights,
       party_size: party,
-      note: discountNote ?? null,
-      // The discount fallback is a REAL event a caller may want to surface.
+      note: notes.join(" ") || null,
+      warnings: notes,
       discounts_relaxed: Boolean(discountNote),
-      warnings: discountNote ? [discountNote] : [],
       plan_count: plans.length,
       plans: plans.map((r) => shape(r, false)),
       wildcard: wildcard ? shape(wildcard, true) : null,
     };
 
+    // The warnings LEAD: a caller relaying this answer reads top-down, and
+    // the first thing it says must not be a 35mm plan that is not 35mm.
     const L = [
-      `Movie night — ${w.label}${party ? `, party of ${party}` : ""} — ${plans.length} plan${plans.length === 1 ? "" : "s"}${wildcard ? " and a wildcard" : ""}`,
+      ...prefWarnings,
+      `Movie night ${w.label}${party ? ` for ${party}` : ""} — ${plans.length} plan${plans.length === 1 ? "" : "s"}${wildcard ? " and a wildcard" : ""}:`,
     ];
-    if (discountNote) L.push(`Note: ${discountNote}`);
-    const render = (pl, heading) => {
-      const s = pl.showtime;
-      L.push("");
-      L.push(`${heading} ${pl.film?.title ?? "—"}${pl.film?.year ? ` (${pl.film.year})` : ""}`);
-      L.push(`   ${s.venue.name} · ${s.night_of} · ${s.local_time}${s.tags?.length ? ` [${s.tags.join(", ")}]` : ""}`);
-      if (pl.why.length) L.push(`   Why: ${pl.why.join("; ")}`);
-      L.push(`   Tickets: ${s.ticket_url}`);
-      L.push(`   Calendar: ${s.calendar_url}`);
-      if (detailed) L.push(`   score ${pl.score} · ${s.confidence ?? "?"} · ${s.source_tier ?? "?"} · verified ${s.verified_at ?? "?"}`);
+    if (discountNote) L.push(discountNote);
+    L.push("");
+
+    // ——— WHY EACH PICK, IN THE HOSTED WORDS ——— renderPlan()'s reason
+    // sentence, as written. A bound the pick meets is not a preference it
+    // missed: every pick has already passed the hard bounds and the
+    // discount filter, so only the tilts can miss. A held film's sentence
+    // falls through to its runtime, genres and director.
+    const NEGATIVE = new Set(["outside your genres", "matinee"]);
+    const bounded = p.time_after !== undefined || p.time_before !== undefined;
+    const discounted = !!p.discounts_only && !discountNote;
+    const relaxed = !!p.discounts_only && !!discountNote;
+    const tilts = !!(p.likes?.length || p.avoids?.length || p.formats?.length || p.home_venues?.length || p.window || p.no_matinee);
+    const met = [bounded && "starts within the times you gave", discounted && "is at a theater with a discount that night"]
+      .filter(Boolean)
+      .join(" and ");
+    const reason = (r, isWildcard) => {
+      const film = films.get(r.screening.filmKey);
+      const pos = r.why.filter((x) => !NEGATIVE.has(x));
+      const h = filmExtras(film)?.hook;
+      const dir = film?.directors?.[0];
+      const what = h
+        ? `${dir ? `${dir}'s ` : ""}${film.title} — ${h}`
+        : `${film?.runtimeMin ? `${film.runtimeMin} minutes of ` : ""}${(film?.genres ?? []).join(", ").toLowerCase() || "cinema"}${dir ? `, directed by ${dir}` : ""}.`;
+      const why1 = isWildcard
+        ? p.likes?.some((x) => String(x).trim())
+          ? `Deliberately outside your stated genres: the highest-ranked show that is not one of them${pos.length ? ` (${pos.join(", ")})` : ""}.`
+          : `One more option, the next film down the ranking${pos.length ? ` (${pos.join(", ")})` : ""}.`
+        : pos.length
+          ? `It lines up with what you asked for: ${pos.join(", ")}.`
+          : tilts
+            ? `No genre, format, time-window or theater preference you gave lifts this show${met ? `; it ${met}` : ""}.`
+            : met
+              ? `It ${met}; with nothing else to rank by, shows are ordered by start time.`
+              : relaxed
+                ? `No screening sits under a discount in that window, so shows are ordered by start time.`
+                : `No preferences were given, so shows are ordered by start time.`;
+      return `${why1} ${what}`;
     };
-    data.plans.forEach((pl, i) => render(pl, `${i + 1}.`));
-    if (data.wildcard) render(data.wildcard, "Wildcard:");
-    L.push("", "Ranking is preference-fit only — never pay-ranked, and nothing is hidden from you.");
-    return both(finish(data, L), data);
+    // THE HOSTED renderPlan() PROSE, line for line: the film, its time,
+    // night, house, neighborhood and tags on one line; the reason; ticket and
+    // calendar links on one line; detailed adds the score, the screening id,
+    // the film page and the preshow, then the accuracy stamp.
+    const render = (pl, r, heading) => {
+      const s = r.screening;
+      const film = films.get(s.filmKey);
+      const v = venues.get(s.venueId);
+      if (!film || !v) return;
+      L.push(
+        `${heading} ${film.title}${film.year ? ` (${film.year})` : ""} — ${displayTime(s.startsAt, base.timezone)}, ${nightLabel(s.nightOf)} at ${v.name} (${v.neighborhood})${tagBadge(s)}`,
+      );
+      L.push(`   ${reason(r, pl.is_wildcard)}`);
+      L.push(`   Tickets: ${pl.showtime.ticket_url} · Calendar: ${pl.showtime.calendar_url}`);
+      if (detailed) {
+        L.push(`   score ${r.score} · screening ${s.id} · film: ${filmUrl(film.slug, base.region)}${v.preshowMin ? ` · ~${v.preshowMin} min preshow` : ""}`);
+        L.push(`   ${provDetail(pl.showtime)}`);
+      }
+      L.push("");
+    };
+    data.plans.forEach((pl, i) => render(pl, plans[i], `${i + 1}.`));
+    if (data.wildcard) render(data.wildcard, wildcard, "Wildcard:");
+    return both(finish(base, L), data);
   },
 );
 
@@ -1144,14 +1369,14 @@ tool(
   {
     title: "Discount grid",
     description:
-      "Every structured discount across one board's theaters — venue, label, detail, and day-bound days — with the ones that apply today flagged.",
+      `Every structured discount across one board's theaters — venue, label, detail, and day-bound days — with the ones that apply today flagged. Membership and discount-card pricing is not listed; it reads "Member pricing; see the theater". ${READS_ONLY}`,
     inputSchema: { response_format: responseFormat, region: regionParam },
     outputSchema: discountsOut.shape,
     annotations: LISTING,
   },
   async (args) => {
-    void args;
-    const feed = await listings(args.region ? { region: args.region } : {});
+    const detailed = isDetailed(args);
+    const feed = await boardFeed(args.region);
     const base = baseOf(feed);
     // TODAY IS THE BOARD'S CALENDAR DATE, not the night — the hosted
     // discountsData reads cityNow(d.timezone).dow. This derived it from the
@@ -1175,11 +1400,14 @@ tool(
           // prose and is not counted; this counted every one of them.
           const applies_today = d.day !== undefined && d.day !== null && d.day === today_dow;
           if (applies_today) applies_today_count += 1;
+          // The hosted discountsData row, key for key: membership and card
+          // pricing through shownDiscount (shape.js), then the kind, the
+          // day and its name.
           return {
-            label: d.label,
+            ...shownDiscount(d),
             kind: d.kind ?? "other",
             day: d.day ?? null,
-            detail: d.detail ?? "",
+            day_name: d.day !== undefined && d.day !== null ? DAY_NAMES[d.day] : null,
             applies_today,
           };
         }),
@@ -1187,13 +1415,27 @@ tool(
 
     const data = { ...base, today_dow, today_name, applies_today_count, venues };
 
-    const L = [`Theater discounts on this board — ${applies_today_count} active today (${today_name})`];
-    for (const v of venues) {
-      L.push("", `${v.name}${v.neighborhood ? ` · ${v.neighborhood}` : ""}`);
-      for (const d of v.discounts) {
-        L.push(`  ${d.applies_today ? "•" : "·"} ${d.label} — ${d.detail}${d.day !== null ? ` (${d.applies_today ? "today" : "day " + d.day})` : ""}`);
+    // THE HOSTED discounts() PROSE, line for line: what day it is on the
+    // board's own calendar, every house with a discount, each discount with
+    // its day and an APPLIES TODAY mark when its day is today (detailed adds
+    // its kind and the venue id), then the count of day-bound discounts that
+    // apply today and the sentence that matinee, membership and card pricing
+    // runs any day — so a day with no day-bound discount never reads as a
+    // day with no discount at all.
+    const L = [`Theater discounts on this board — today is ${today_name}:`, ""];
+    for (const v of feed.venues) {
+      if (!(v.discounts ?? []).length) continue;
+      L.push(`${v.name}:`);
+      for (const disc of v.discounts) {
+        const bound = disc.day !== undefined && disc.day !== null;
+        const shownDisc = shownDiscount(disc);
+        L.push(`- ${shownDisc.label}${bound ? ` (${DAY_NAMES[disc.day]}s)` : ""}: ${shownDisc.detail}${bound && disc.day === today_dow ? " · APPLIES TODAY" : ""}`);
+        if (detailed) L.push(`  kind: ${disc.kind} · venue: ${v.id}`);
       }
+      L.push("");
     }
+    const n = applies_today_count;
+    L.push(`${n} day-bound discount${n === 1 ? "" : "s"} appl${n === 1 ? "ies" : "y"} today; matinee, membership, and discount-card pricing runs on its own terms any day.`);
     return both(finish(base, L), data);
   },
 );
@@ -1203,7 +1445,7 @@ tool(
   {
     title: "Coming soon",
     description:
-      `Lists films whose first screening on this board is more than 48 hours out, sorted by first night — runs worth booking early. Configurable horizon. It sets no alert, watch or reminder. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
+      `Lists films whose first screening on this board is more than 48 hours out, sorted by first night. Configurable horizon. It sets no alert, watch or reminder. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: {
       horizon_days: z
         .number()
@@ -1221,7 +1463,7 @@ tool(
   async (args) => {
     const detailed = isDetailed(args);
     const horizon_days = Math.min(Math.max(args.horizon_days ?? 21, 1), 90);
-    const feed = await listings(args.region ? { region: args.region } : {});
+    const feed = await boardFeed(args.region);
     const base = baseOf(feed);
     const venues = venueIndex(feed);
     const films = new Map(feed.films.map((f) => [f.key, f]));
@@ -1266,24 +1508,34 @@ tool(
       films: rows.map((r) => ({
         ...filmShape(r.film, { region: base.region }),
         first_night: r.first.nightOf,
-        first_showtime: screeningShape(r.first, venues, { detailed, region: base.region }),
+        first_showtime: screeningShape(r.first, venues, { detailed, region: base.region, tz: base.timezone }),
         opening_venues: r.opening_venues,
       })),
     };
 
-    const L = [`Coming soon — ${rows.length} film${rows.length === 1 ? "" : "s"} whose first screening on this board is more than 48 hours out, within ${horizon_days} days.`];
-    if (!rows.length) L.push("", "Nothing that far ahead on the board yet — repertory calendars post close to the date.");
-    // The prose is capped; the structured payload is not. A cap nobody is told
-    // about reads as "that is all of them", which is the one thing it is not.
-    const PROSE_CAP = 40;
-    if (rows.length > PROSE_CAP) {
-      L.push("", `Listing the first ${PROSE_CAP} by date — all ${rows.length} are in the structured payload.`);
+    // THE HOSTED comingSoon() PROSE, line for line. An empty horizon is one
+    // sentence. Otherwise each film on one line — title, first night, the
+    // houses opening it, the film page — capped at 40 in concise with the
+    // cap said; detailed lists every film with its first curtain, ticket
+    // link and accuracy stamp. The structured payload is never capped.
+    if (!rows.length) {
+      return both(finish(base, [`Nothing new opening more than 48 hours out within ${horizon_days} days.`]), data);
     }
-    for (const r of rows.slice(0, PROSE_CAP)) {
-      L.push("");
-      L.push(`${nightLabel(r.first.nightOf)} — ${r.film.title}${r.film.year ? ` (${r.film.year})` : ""}`);
-      L.push(`  ${r.opening_venues.join(", ")} · first curtain ${displayTime(r.first.startsAt)}`);
-      L.push(`  ${filmUrl(r.film.slug, base.region)}`);
+    const CONCISE_CAP = 40;
+    const shown = detailed ? rows : rows.slice(0, CONCISE_CAP);
+    const L = [`Coming soon — first screenings more than 48h out, next ${horizon_days} days (${rows.length}):`, ""];
+    shown.forEach((r, i) => {
+      L.push(
+        `- ${r.film.title}${r.film.year ? ` (${r.film.year})` : ""} — first night ${nightLabel(r.first.nightOf)} at ${r.opening_venues.join(", ")} · ${filmUrl(r.film.slug, base.region)}`,
+      );
+      if (detailed) {
+        const first = data.films[i].first_showtime;
+        L.push(`  first curtain ${displayTime(r.first.startsAt, base.timezone)} · tickets: ${first.ticket_url}`);
+        L.push(`  ${provDetail(first)}`);
+      }
+    });
+    if (shown.length < rows.length) {
+      L.push(`(+${rows.length - shown.length} more — use response_format: "detailed" or a shorter horizon_days for the rest)`);
     }
     return both(finish(base, L), data);
   },
@@ -1310,16 +1562,15 @@ tool(
 tool(
   "scenef_resolve_board",
   {
-    title: "Which board covers this place",
+    title: "Find the region for a place",
     description:
-      "Translate a city, 5-digit ZIP, neighborhood or board alias into the region handle every other tool takes. Returns the board and WHAT matched it. Refuses rather than guessing: an ambiguous name returns candidates (Hollywood names both the Los Angeles board and the Miami board), a place we cover but have not published returns outside_coverage with the nearest published boards, and an unknown string returns unknown with no fallback board. Coordinates are not accepted — this reads names, not locations. It is an exact lookup in SceneF's own place table: no geocoder and no web search.",
+      `Translate a city, 5-digit ZIP, neighborhood or board alias into the region handle every other tool takes. Returns the board and WHAT matched it. Refuses rather than guessing: an ambiguous name returns candidates (Hollywood names both the Los Angeles board and the Miami board), a name SceneF knows only as a place outside its published boards returns outside_coverage (with any published board within 100 miles), and any other name it cannot place returns unknown with no fallback board. ${BOARD_SCOPE}. Coordinates are not accepted — this reads names, not locations. It is an exact lookup in SceneF's own place table: no geocoder and no web search. ${READS_ONLY}`,
     inputSchema: {
-      place: z
-        .string()
+      place: text()
         .describe('A city ("Pasadena"), a 5-digit ZIP ("94121"), a neighborhood ("the Mission") or a board alias ("the East Bay", "sf").'),
     },
     outputSchema: placeOut.shape,
-    annotations: CLOSED_LOOKUP,
+    annotations: LISTING,
   },
   async (args) => {
     const r = await resolvePlace(args.place);
@@ -1338,14 +1589,16 @@ tool(
         : {}),
       ...(typeof r.note === "string" ? { note: r.note } : {}),
     };
-    // The hosted server's line, word for word.
+    // The hosted server's line, word for word. A staged name in a lit state
+    // carries its own note on the unknown branch: SceneF cannot say it covers
+    // the place, and cannot say it does not.
     const line = data.ok
-      ? `${data.input} is on the ${data.region_name} board (region=${data.region}), matched by ${data.matched}.`
+      ? `${echoInput(data.input)} is on ${/^the /i.test(data.region_name ?? "") ? data.region_name : `the ${data.region_name}`} board (region=${data.region}), matched by ${data.matched}.`
       : data.reason === "ambiguous"
-        ? `"${data.input}" names more than one board: ${(data.candidates ?? []).map((c) => `${c.region} (${c.region_name})`).join(", ")}. Ask which, rather than choosing.`
+        ? `"${echoInput(data.input)}" names more than one board: ${(data.candidates ?? []).map((c) => `${c.region} (${c.region_name})`).join(", ")}. Ask which, rather than choosing.`
         : data.reason === "outside_coverage"
           ? `${data.note ?? ""}${(data.nearest_lit ?? []).length ? ` Nearest published: ${(data.nearest_lit ?? []).map((n) => `${n.region_name} (${n.miles}mi)`).join(", ")}.` : ""}`
-          : `I do not know "${data.input}". Call scenef_now for the boards I do publish.`;
+          : data.note ?? `I do not know "${echoInput(data.input)}". Call scenef_now with no region for the boards SceneF publishes.`;
     return both(line, data);
   },
 );
@@ -1353,16 +1606,19 @@ tool(
 tool(
   "scenef_now",
   {
-    title: "Right now",
+    title: "Check what is still on tonight",
     description:
-      `The cheap is-anything-on call: how many screenings tonight, the next 5 curtains across this board with venue/time/film, and dataset freshness per source. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
+      `Use this for a quick check of what is still on tonight on one board: how many screenings tonight, the next 5 showtimes with venue/time/film, when the data was generated and which theaters' listings may be out of date. Called with no region it also lists every board id with its place and timezone. ${TICKET_LINKS} ${DETAILED_CARRIES_ACCURACY}`,
     inputSchema: { response_format: responseFormat, region: regionParam },
     outputSchema: nowOut.shape,
     annotations: LISTING,
   },
   async (args) => {
     const detailed = isDetailed(args);
-    const extra = args.region ? { region: args.region } : {};
+    // The board list rides only on a call that named no board — the hosted
+    // wantsBoardList(). A caller who passed region= already knows the
+    // handles.
+    const wantsBoardList = !args.region?.trim();
 
     // THE HOSTED RULE, EXACTLY — three numbers from two sets, computed HERE
     // at call time from the board and the clock:
@@ -1386,11 +1642,10 @@ tool(
     // lit night" (is_tonight false) for the night the hosted server was
     // already calling tonight. The rows are the feed's; the night is decided
     // now, in the board's zone.
-    const board = await listings(extra);
+    const board = await boardFeed(args.region);
     const t = tonight(board);
     const tonightNight = t.nightIso;
     const is_tonight = t.label === "tonight";
-    const now = Date.now();
 
     const base = baseOf(board);
     const venues = venueIndex(board);
@@ -1400,98 +1655,182 @@ tool(
     const stillToCome = all.filter(notStarted);
     const next = upcoming(board).slice(0, 5);
 
-    // Freshness per source, computed from the whole board: a source is healthy
-    // when its most recent verification landed within the last 24 hours. Stated
-    // rather than assumed — `basis` says exactly what the number means.
+    // SOURCE HEALTH PER THEATER — the hosted nowSnapshotData() count and
+    // staleLine() names, read from the one place this transport can see
+    // them. The hosted server counts d.sourceHealth: one entry per venue, ok
+    // when that venue's own fetch succeeded. Every REST row carries the same
+    // verdict as freshness.source_status ("ok"; "failed" or "held" when the
+    // fetch did not succeed and the rows are retained), so a theater with
+    // rows on the board is counted, and an unhealthy one is named in the
+    // hosted words with the age of its newest verified row (the hosted
+    // newestVerified()).
     //
-    // RECORDED GAP (2026-09-08 review), left as is on purpose. The hosted
-    // server's sources.healthy/total counts d.sourceHealth — one entry per
-    // venue, ok when that venue's own fetch succeeded — so it reports e.g.
-    // 17/17 where this reports 9/9 distinct sources verified within 24h. No
-    // public REST door exposes sourceHealth, so the two numbers cannot be
-    // made to agree from this side without inventing one; the fix is a REST
-    // door on the hosted side, not an approximation here. The description
-    // is shared with the hosted server and must not change for this.
-    const latest = new Map();
+    // RECORDED GAP (2026-09-08, narrowed 2026-10-10): a venue whose fetch
+    // failed and left no rows is invisible in the feed, so it is neither
+    // counted nor named — on 2026-10-10 hosted sf read 16/17 (New People
+    // unhealthy, no rows) where this reads 15/15, while oahu read 11/12 on
+    // both, naming Consolidated Ward. `basis` says so. The hosted detailed
+    // detail[] is not reproduced: its screening_count and notes come from
+    // the ingest record, not the rows. The fix for the rest is a REST door
+    // on sourceHealth, not an approximation here.
+    const health = new Map();
     for (const s of board.screenings) {
-      for (const src of s.sources ?? [s.provenance?.source].filter(Boolean)) {
-        const at = s.verified_at ?? s.provenance?.lastVerifiedAt ?? null;
-        if (!at) continue;
-        const prev = latest.get(src);
-        if (!prev || at > prev) latest.set(src, at);
-      }
+      const status = s.freshness?.source_status;
+      if (!status) continue;
+      const h = health.get(s.venueId) ?? { ok: true, newest: null };
+      if (status !== "ok") h.ok = false;
+      const at = s.verified_at ?? s.provenance?.lastVerifiedAt ?? null;
+      if (at && (!h.newest || Date.parse(at) > Date.parse(h.newest))) h.newest = at;
+      health.set(s.venueId, h);
     }
-    const healthy = [...latest.values()].filter((at) => now - new Date(at).getTime() < 86_400_000).length;
+    const venueOrder = [...board.venues.map((v) => v.id).filter((id) => health.has(id)), ...[...health.keys()].filter((id) => !venues.has(id))];
+    const unhealthy = venueOrder
+      .filter((id) => !health.get(id).ok)
+      .map((id) => {
+        const name = venues.get(id)?.name ?? id;
+        const ago = agoText(health.get(id).newest);
+        return { venue_id: id, name, note: `${name}: listings may be out of date${ago ? ` (last updated ${ago})` : ""}` };
+      });
+    const healthy = health.size - unhealthy.length;
 
-    const boards = await boardsList();
+    const boards = wantsBoardList ? await boardsList() : null;
     const data = {
       ...base,
-      boards: boards ?? [],
       night_of: tonightNight,
       is_tonight,
       screenings_tonight: all.length,
       still_to_come: stillToCome.length,
       next_curtains: next.map((s) => ({
-        ...screeningShape(s, venues, { detailed, region: base.region }),
+        ...screeningShape(s, venues, { detailed, region: base.region, tz: base.timezone }),
         film: filmShape(films.get(s.filmKey), { region: base.region }),
+        film_key: s.filmKey,
       })),
+      // The machine half of the board list, on the same condition.
+      ...(wantsBoardList ? { boards: boards ?? [] } : {}),
       sources: {
         healthy,
-        total: latest.size,
-        basis: "A source is healthy when its most recent verification landed within the last 24 hours.",
+        total: health.size,
+        unhealthy,
+        basis: "Counted per theater from each listing's freshness.source_status; a theater with no listings on this board is not visible here and is not counted.",
       },
     };
 
+    // THE HOSTED nowSnapshot() PROSE, line for line: tonight's count and
+    // how many are still to come (or the next lit night's count), the next
+    // five curtains — time, the night when it is not tonight's, film, house,
+    // tags, ticket link, and in detailed the accuracy stamp — then the board
+    // and, on a call that named none, every board. The hosted answer ends
+    // with "Data: generated … · N/M sources healthy." and a line per
+    // unhealthy theater; this one does too, from the rows (SOURCE HEALTH
+    // above), and its count says which theaters it covers, since a theater
+    // with no listings is not visible here.
+    const nightWord = is_tonight ? "tonight" : `${nightLabel(tonightNight)} (the next lit night)`;
     const L = [
-      is_tonight
-        ? `${nightLabel(tonightNight)} — ${all.length} screening${all.length === 1 ? "" : "s"} tonight, ${stillToCome.length} still to come.`
-        : `${nightLabel(tonightNight)} (the next lit night) — ${all.length} screening${all.length === 1 ? "" : "s"}.`,
-      `Sources: ${healthy}/${latest.size} verified within 24 hours. Data as of ${base.data_as_of}.`,
+      `${all.length} screening${all.length === 1 ? "" : "s"} ${nightWord}${is_tonight ? `, ${stillToCome.length} still to come` : ""}.`,
     ];
-    L.push("", "Next curtains city-wide:");
-    if (!next.length) L.push("  No upcoming curtains on the books.");
-    for (const s of next) {
-      L.push(
-        `  ${displayTime(s.startsAt)}${s.nightOf !== tonightNight ? ` (${nightLabel(s.nightOf)})` : ""} ${venues.get(s.venueId)?.short ?? s.venueId} — ${films.get(s.filmKey)?.title ?? s.filmKey}`,
-      );
-      L.push(`    ${screeningShape(s, venues, { region: base.region }).ticket_url}${detailed ? `  (${s.confidence ?? "?"} · verified ${s.verified_at ?? "?"})` : ""}`);
+    if (next.length) {
+      L.push("", "Next showtimes on this board:");
+      next.forEach((s, i) => {
+        const row = data.next_curtains[i];
+        L.push(
+          `- ${displayTime(s.startsAt, base.timezone)}${s.nightOf !== tonightNight ? ` (${nightLabel(s.nightOf)})` : ""} — ${films.get(s.filmKey)?.title ?? s.filmKey} at ${venues.get(s.venueId)?.short ?? s.venueId}${tagBadge(s)} · ${row.ticket_url}`,
+        );
+        if (detailed) L.push(`  ${provDetail(row)}`);
+      });
+    } else {
+      L.push("", "No upcoming showtimes on the books.");
     }
-    // The instructions promise this tool names the boards — each id with the
-    // place it names, from /api/boards (see boardsList). When the roster is
-    // unavailable the pointer is honest instead of the list being invented.
+    // The instructions promise this tool, called with no region, names the
+    // boards — each id with the place it names (glossed only where the two
+    // differ) and its zone where that differs from this board's, the hosted
+    // nowSnapshot() list, from /api/boards (see boardsList). When the roster
+    // is unavailable the pointer is honest instead of the list being
+    // invented. A call that named a board gets the hosted pointer instead.
     L.push("", `This board: ${base.region_name} (${base.region}) · ${base.timezone}.`);
-    if (boards?.length) {
+    if (!wantsBoardList) {
+      L.push("Call scenef_now with no region for the list of every board.");
+    } else if (boards?.length) {
       L.push(
         `Pass region= to any tool to read another. ${boards.length} boards:`,
-        boards.map((b) => `${b.region} — ${b.name} [${b.timezone}]`).join(", "),
+        boards
+          .map((b) => {
+            const gloss = b.name && b.name.toLowerCase() !== b.region.toLowerCase() ? ` (${b.name})` : "";
+            const tz = b.timezone === base.timezone ? "" : ` [${b.timezone}]`;
+            return `${b.region}${gloss}${tz}`;
+          })
+          .join(", "),
       );
     } else {
       L.push("Pass region= to any tool to read another board; the current set is listed at https://scenef.com/api/boards.");
     }
+    L.push("", `Data: generated ${base.data_as_of} · ${healthy}/${health.size} sources healthy (theaters with listings on this board).`);
+    for (const u of unhealthy) L.push(`- ${u.note}`);
     return both(finish(base, L), data);
   },
 );
+
+/** "20h ago" — how long since an instant, the hosted agoText(). */
+function agoText(iso) {
+  const t = iso ? Date.parse(iso) : NaN;
+  if (!Number.isFinite(t)) return null;
+  const hours = (Date.now() - t) / 3_600_000;
+  if (hours < 1) return "less than an hour ago";
+  if (hours < 48) return `${Math.floor(hours)}h ago`;
+  return `${Math.floor(hours / 24)} days ago`;
+}
+
+// ——— the accuracy record in prose — the hosted helpers, as written ———
+
+/** A pass rate to one decimal, or "not established" when nothing
+ *  gradeable ran — the hosted pct(). */
+function pct(rate) {
+  return rate === null || rate === undefined ? "not established" : `${Math.round(rate * 1000) / 10}%`;
+}
+
+/** "venue-published 697, single-source 1221" — levels with a count only;
+ *  the hosted mixText(). */
+function mixText(mix) {
+  const parts = Object.entries(mix ?? {}).filter(([, n]) => n > 0);
+  return parts.length ? parts.map(([k, n]) => `${k} ${n}`).join(", ") : "none published";
+}
+
+/** The tally of one record — the hosted tallyText(). */
+function tallyText(t) {
+  return `${t.checks} check${t.checks === 1 ? "" : "s"} — ${t.confirmed} confirmed, ${t.missing} missing, ${t.unreachable} unreachable · pass rate ${pct(t.pass_rate)}`;
+}
+
+/** One venue's line — the hosted venueLine(): a house publishing nothing
+ *  carries its note; every other its tier, mix, last verification and tally. */
+function venueLine(v) {
+  const head = `- ${v.name} (${v.venue_id}): ${v.screenings} screening${v.screenings === 1 ? "" : "s"}`;
+  if (!v.screenings) return `${head}${v.note ? ` · ${v.note}` : ""}`;
+  return `${head} · ${v.source_tier ?? "tier unrecorded"} · ${mixText(v.confidence_mix)} · last verified ${v.last_verified_at ?? "never"} · ${tallyText(v)}`;
+}
 
 tool(
   "scenef_accuracy",
   {
     title: "The accuracy record",
-    description: `${ACCURACY_CONTRACT} This tool returns that record: the site-wide confidence mix, the counts of verification checks confirmed / missing / unreachable over the record's window (window_days in the payload — 30 days at present) with the pass rate and the exact denominator it was computed from, the same per venue with source tier and last-verified time, and the definitions of every level. Checks that could not run — a bot wall, a client-rendered page — are graded unreachable and excluded from the pass rate rather than counted as passes. Quote these numbers directly; they are recomputed on every call.`,
+    description: `Returns SceneF's verification record: this board's confidence mix, the counts of verification checks confirmed / missing / unreachable over the record's window (window_days in the payload — 30 days at present) with the pass rate and the exact denominator it was computed from, the same per venue with source tier and last-verified time, and the definitions of every level. Checks that could not run — a bot wall, a client-rendered page — are graded unreachable and excluded from the pass rate rather than counted as passes. Quote these numbers directly; they are recomputed on every call. ${READS_ONLY}`,
     inputSchema: { response_format: responseFormat, region: regionParam },
     outputSchema: accuracyOutput.shape,
     annotations: LISTING,
   },
   async (args) => {
     const detailed = isDetailed(args);
-    const [payload, feed] = await Promise.all([
-      accuracyRecord(args.region), listings(args.region ? { region: args.region } : {}),
-    ]);
+    // The board first, as the hosted datasetFor() does: an unknown region is
+    // refused in the hosted sentence before the record is read.
+    const feed = await boardFeed(args.region);
+    const payload = await accuracyRecord(args.region?.trim() || undefined);
     const base = baseOf(feed);
     // The API's record, picked to the advertised schema rather than passed
     // verbatim: the feed grew a `scope` field (2026-09-08) and verbatim
     // passthrough turned that growth into a validation crash for every
     // client. An explicit pick means the API can evolve without breaking
-    // the contract this tool advertises.
+    // the contract this tool advertises. Since e7b11e5 /api/accuracy serves
+    // the hosted accuracyForMcp() shape — no site.computed_from, venue notes
+    // scrubbed of fetch errors and upstream urls — so site and venues pass
+    // through as served; never add a local scrub or computed_from back.
     const record = {
       ...base,
       data_as_of: payload.data_as_of,
@@ -1501,39 +1840,56 @@ tool(
       method: payload.method,
       docs: payload.docs,
     };
-    const s = payload.site;
-
+    // THE HOSTED accuracySnapshot() PROSE, line for line (pct, mixText,
+    // tallyText and venueLine below are its helpers, as written): the board's
+    // screenings and confidence mix, the checks and the pass rate to one
+    // decimal, the basis, when the record opened and last checked; then
+    // EVERY venue publishing showtimes, in the record's order, with its tally
+    // — a house with no checks says its rate is not established — and the
+    // houses listed but publishing none, with their notes (three in concise,
+    // all in detailed). Detailed adds the definitions. It does not go through
+    // finish(): it ends with the record's url and method page, then the
+    // attribution WITHOUT the "accuracy record:" suffix — this answer IS the
+    // record.
+    const a = payload;
+    const s = a.site;
     const L = [
-      `SceneF accuracy record — data as of ${payload.data_as_of}`,
+      `SceneF accuracy record — computed from the dataset and our own verification runs, failures included. Nothing here is asserted.`,
       "",
-      `${s.checks} verification checks over ${s.window_days} days: ${s.confirmed} confirmed, ${s.missing} missing, ${s.unreachable} unreachable.`,
-      `Pass rate ${s.pass_rate === null ? "not yet computable" : `${(s.pass_rate * 100).toFixed(2)}%`} — ${s.pass_rate_basis}`,
-      `${s.screenings} screenings on the board. Confidence mix: ${Object.entries(s.confidence_mix).map(([k, v]) => `${k} ${v}`).join(" · ")}`,
+      `Board: ${s.screenings} screenings · confidence mix: ${mixText(s.confidence_mix)}.`,
+      `Checks, last ${s.window_days} days: ${tallyText(s)}.`,
+      `Pass rate basis: ${s.pass_rate_basis}`,
+      `Record opened ${s.first_check_at ?? "not yet"} · last check ${s.last_check_at ?? "none in window"}.`,
+      "",
     ];
-
-    const venues = [...payload.venues].sort((a, b) => b.checks - a.checks);
-    L.push("", "By theater:");
-    for (const v of detailed ? venues : venues.slice(0, 10)) {
-      L.push(
-        `  ${v.name} — ${v.source_tier ?? "?"} · ${v.screenings} screenings · ${v.checks} checks${v.pass_rate === null ? "" : ` · ${(v.pass_rate * 100).toFixed(1)}%`} · last verified ${v.last_verified_at ?? "never"}`,
-      );
+    const publishing = (a.venues ?? []).filter((v) => v.screenings > 0);
+    const linkOnly = (a.venues ?? []).filter((v) => v.screenings === 0);
+    L.push(`Per venue (${publishing.length} publishing showtimes):`);
+    for (const v of publishing) L.push(venueLine(v));
+    if (linkOnly.length) {
+      L.push("", `Listed but publishing no showtimes here (${linkOnly.length}):`);
+      for (const v of detailed ? linkOnly : linkOnly.slice(0, 3)) L.push(venueLine(v));
+      if (!detailed && linkOnly.length > 3) L.push(`- (+${linkOnly.length - 3} more — response_format: "detailed" for the rest)`);
     }
-    if (!detailed && venues.length > 10) L.push(`  …${venues.length - 10} more — call with response_format "detailed".`);
-
     if (detailed) {
-      L.push("", "Confidence levels:");
-      for (const [k, v] of Object.entries(payload.method.confidence_levels)) L.push(`  ${k}: ${v}`);
-      L.push("", `Rings: ${payload.method.rings.join(" · ")}`);
+      L.push("", "Confidence levels (how well a showtime is known):");
+      for (const [k, v] of Object.entries(a.method?.confidence_levels ?? {})) L.push(`- ${k}: ${v}`);
+      L.push("", "Source tiers (where it came from):");
+      for (const [k, v] of Object.entries(a.method?.source_tiers ?? {})) L.push(`- ${k}: ${v}`);
+      L.push("", "Check grades (what a verification run can conclude):");
+      for (const [k, v] of Object.entries(a.method?.check_grades ?? {})) L.push(`- ${k}: ${v}`);
+      L.push("", "The rings:");
+      (a.method?.rings ?? []).forEach((r, i) => L.push(`${i + 1}. ${r}`));
     }
-    // The one tool whose tail is its own, mirrored per tool: the hosted
-    // accuracySnapshot() does not go through finish(). It ends with the
-    // record's url and method page, then the attribution line WITHOUT the
-    // "accuracy record:" suffix — this answer IS the record.
     L.push(
       "",
-      `Full JSON: ${base.accuracy_url} · method: ${payload.docs}`,
-      `— Showtimes via SceneF.com, data as of ${payload.data_as_of}`,
+      `Full JSON: ${base.accuracy_url} · method: ${a.docs}`,
+      `— Showtimes via SceneF.com, data as of ${a.data_as_of}`,
     );
+    // The record and the board are each read through the edge cache; an
+    // expired copy of either is said (shape.js edgeStaleNote).
+    const stale = edgeStaleNote(edgeStaleness(payload) ?? edgeStaleness(feed));
+    if (stale) L.push(stale);
     return both(L.join("\n"), record);
   },
 );

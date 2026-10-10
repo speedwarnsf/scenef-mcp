@@ -8,8 +8,8 @@ SceneF started in San Francisco — one of the last great moviegoing cities:
 single-screen neighborhood houses from the 1920s, repertory calendars that
 change nightly, 35mm and 70mm prints, midnight movies, and yes, the
 multiplexes too. It now runs **56 regional boards across California, Florida and
-Hawaii** — Los Angeles to Sacramento, San Diego to Maui, Miami to Pensacola — and more states
-are soaking. Each board brings venue schedules and licensed showtime feeds
+Hawaii** — Los Angeles to Sacramento, San Diego to Maui, Miami to Pensacola.
+Each board brings venue schedules and a third-party showtimes data service
 together, with source confidence and freshness so callers can see what the
 listings are based on.
 
@@ -19,7 +19,7 @@ stdio server in this repo, running the same ten tools.
 **Every tool except `scenef_resolve_board` takes a `region`** — `"sf"`, `"la-central"`, `"oahu"`,
 `"sacramento"`, … — and omitting it means the default board (`sf`), never a
 guess from where you are. Use `scenef_resolve_board` for a named place and
-`scenef_now` for the current list of boards.
+`scenef_now` with no region for the current list of boards.
 Times are each theatre's own wall clock: Hawaii runs two or three hours off Pacific
 and keeps no DST, and each board reports its timezone with its data.
 
@@ -103,10 +103,10 @@ the regional probes; the default is `la-central`.
 
 | Tool | What it answers |
 | --- | --- |
-| `scenef_whats_playing` | Ranked films for tonight / tomorrow / the weekend / a date — opens with **Notable tonight**: scarcity facts with receipts (measured seat counts, final nights, lone 35/70mm prints, posted discounts, live events) |
+| `scenef_whats_playing` | Ranked films for tonight / tomorrow / the weekend / a date — when the window covers tonight, opens with **Notable tonight**: scarcity facts with receipts (measured seat counts, final nights, lone 35/70mm prints, posted discounts, live events) |
 | `scenef_search_showtimes` | Showtimes for one film or theater, with date and hard time filters |
 | `scenef_theater_info` | One theater: address, neighborhood, standing discounts, upcoming board |
-| `scenef_film_details` | Year, runtime, ratings, cast, trailer, every upcoming showtime |
+| `scenef_film_details` | Year, runtime, rating, cast, trailer, the nearest upcoming showtimes |
 | `scenef_plan_movie_night` | Constraints in (time window, genres, formats, theaters), a plan out |
 | `scenef_discounts` | The cheap nights, board-wide |
 | `scenef_coming_soon` | What's opening next |
@@ -123,14 +123,21 @@ ranking. The repertory houses get the same billing as the chains — a lone
 exists to surface, whether that house is in the Richmond or in Hilo.
 
 `scenef_whats_playing` in concise mode returns the total `showtime_count`
-and just the next screening in `showtimes`. Check `showtimes_complete` before
-treating that array as exhaustive; detailed mode returns all selected rows.
+and just the next screening in `showtimes`; detailed mode adds showtime rows,
+about 200 across the answer. `scenef_film_details` and
+`scenef_search_showtimes` return the 40 nearest showtimes in concise mode and
+up to 200 in detailed. `showtime_count` is always the total and
+`showtimes_complete` says whether the array is all of it; narrow by date or
+theater for the rest.
 
 ## Why trust it
 
-- Showtimes come from venue schedules and licensed feeds. Every returned
-  screening carries `confidence`, `source_tier`, `sources`, and `verified_at`
-  in both concise and detailed modes.
+- Showtimes come from venue schedules and a third-party showtimes data
+  service. Many showtimes, including most chain theaters and some
+  independents, come from that service rather than from the theater itself;
+  they are labelled `source_tier: licensed-feed` and carry the weakest claim
+  on the site. Every returned screening carries `confidence`, `source_tier`,
+  `sources`, and `verified_at` in both concise and detailed modes.
 - `data_as_of` is the dataset publication time. `verified_at` and `freshness`
   describe a screening's source evidence; a fresh dataset can retain older
   rows. Freshness measures recency, not correctness. Confirm stale or retained
@@ -138,10 +145,25 @@ treating that array as exhaustive; detailed mode returns all selected rows.
 - The verification record is public — including the checks that failed:
   [scenef.com/api/accuracy](https://scenef.com/api/accuracy).
 
-The local `scenef_now.sources` summary counts distinct reporting sources
-verified within 24 hours; the hosted server counts venue ingest health.
-The local payload states that basis. Per-screening freshness comes directly
-from the canonical REST feed on both transports.
+The local `scenef_now.sources` summary counts theater health the way the
+hosted server does, one theater at a time, and names each theater whose
+listings may be out of date in the hosted words. It reads that health from
+each listing's `freshness.source_status`, so a theater with no listings on
+the board is not visible locally and is not counted; the hosted count can be
+higher by those theaters, and the payload's `basis` and the prose's closing
+`Data:` line say so. Apart from that line, the edge-cache note below and
+input-validation errors (the MCP SDK words those differently; the limits are
+the same), every answer's prose is the hosted server's, line for line. Per-screening freshness
+comes from the canonical REST feed on both transports; the local server keeps
+the feed's allowance, `retained` and `source_status`, and ages `age_hours` and
+`status` from `verified_at` at call time, as the hosted server does.
+
+The REST doors are served through an edge cache that, once a copy expires,
+answers the next request from the expired copy while it refreshes. The hosted
+server reads the current dataset and never sees such a copy. The local server
+asks again (three retries over about three seconds) when the edge reports a
+stale copy; if the edge is still serving it after that, the answer is built on
+it and says so in one line after the footer, and `data_as_of` is that copy's.
 
 ## Prefer plain HTTP?
 

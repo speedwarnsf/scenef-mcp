@@ -26,6 +26,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { notableItem } from "../src/tools.js";
+import { withheldDetail } from "../src/shape.js";
 
 const HOSTED = process.env.SCENEF_MCP_URL ?? "https://scenef.com/mcp";
 // Previews can supply a populated nondefault board without skipping coverage.
@@ -115,8 +116,9 @@ check(mine.length === theirs.length, "same number of tools", `${mine.length} vs 
 const names = (xs) => xs.map((t) => t.name).sort().join(", ");
 check(names(mine) === names(theirs), "same tool names", `${names(mine)}\n        ${names(theirs)}`);
 
-// SDK versions differ in their dialect label; these contracts use keywords
-// shared by both. Keep every validation constraint and nested description.
+// The constraint comparison below sets the dialect label aside so a body
+// drift is reported as one; the label itself is held by the whole-object
+// check further down. Keep every validation constraint and nested description.
 const normalizeSchema = (value, key) => {
   if (Array.isArray(value)) return key === "required" ? [...value].sort() : value.map((v) => normalizeSchema(v));
   if (!value || typeof value !== "object") return value;
@@ -159,6 +161,38 @@ for (const t of theirs) {
   for (const hint of ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]) {
     check(m.annotations?.[hint] === t.annotations?.[hint], `${t.name} ${hint} matches`, `${m.annotations?.[hint]} vs ${t.annotations?.[hint]}`);
   }
+  // THE WHOLE ANNOTATIONS OBJECT — a title or a fifth hint on either side is
+  // drift the four named hints above would not see.
+  check(isDeepStrictEqual(m.annotations ?? null, t.annotations ?? null), `${t.name} annotations object matches whole`,
+    `${JSON.stringify(m.annotations)} vs ${JSON.stringify(t.annotations)}`);
+
+  // THE WHOLE TOOL OBJECT, NOTHING EXCLUDED. Every check above reads a
+  // chosen field, and the schema comparison drops the $schema label; a key
+  // either side adds at the top level (execution, _meta, icons) or a label
+  // that differs passed all of them — SDK 1.32.1's `execution` did, on all
+  // ten tools, through 448 green checks. Key order is not compared (objects
+  // are compared as maps); array order is.
+  const drift = whereObjectsDiffer(m, t);
+  check(!drift.length, `${t.name} whole tool object matches hosted`, drift.slice(0, 6).join("\n        "));
+}
+
+/** Every path where two JSON values part ways — `only local`, `only hosted`
+ *  or a differing value — so a whole-object failure names its keys. */
+function whereObjectsDiffer(a, b, path = "") {
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return [`${path || "(root)"}: array length ${a.length} vs ${b.length}`];
+    return a.flatMap((x, i) => whereObjectsDiffer(x, b[i], `${path}[${i}]`));
+  }
+  if (a && b && typeof a === "object" && typeof b === "object" && !Array.isArray(a) && !Array.isArray(b)) {
+    const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])].sort();
+    return keys.flatMap((k) => {
+      const p = path ? `${path}.${k}` : k;
+      if (!(k in b)) return [`${p}: only local ${JSON.stringify(a[k])?.slice(0, 80)}`];
+      if (!(k in a)) return [`${p}: only hosted ${JSON.stringify(b[k])?.slice(0, 80)}`];
+      return whereObjectsDiffer(a[k], b[k], p);
+    });
+  }
+  return isDeepStrictEqual(a, b) ? [] : [`${path || "(root)"}: local ${JSON.stringify(a)?.slice(0, 80)} vs hosted ${JSON.stringify(b)?.slice(0, 80)}`];
 }
 
 // THE INSTRUCTIONS, VERBATIM. The hosted server interpolates its board count
@@ -205,9 +239,25 @@ const PROBES = [
   // night's films, so the candidate list for an ambiguous title depended on
   // the date beside it. The hosted list is the board's.
   ["scenef_search_showtimes", { film: "the", region: REGIONAL_BOARD, date: TOMORROW }],
-  // AN AMBIGUOUS THEATER: the hosted matchVenue() is an either-way substring
-  // over id, name and short, capped at eight, in board order.
+  // AN AMBIGUOUS THEATER: the hosted matchVenue() is namesOverlap over id,
+  // name and short, capped at eight, in board order.
   ["scenef_theater_info", { theater: "amc", region: REGIONAL_BOARD }],
+  // A SHORT NAME MATCHES ONLY AS A WHOLE WORD (hosted 1b13eec). Miami's
+  // O Cinema has the id "o", and an either-way substring test answered
+  // "Tower Theater" with O Cinema's programme; the hosted answer is a
+  // coverage note naming this board.
+  ["scenef_search_showtimes", { venues: ["Tower Theater"], region: "miami" }],
+  // THE RESOLVER'S LINE, in each of its shapes — the article on the ok line
+  // ("the East Bay", not "the the East Bay"), the resolver's own note on an
+  // unknown name it can neither place nor rule out, the dark-place note, and
+  // the fallback sentence.
+  ["scenef_resolve_board", { place: "the East Bay" }],
+  ["scenef_resolve_board", { place: "Berkeley" }],
+  ["scenef_resolve_board", { place: "Albany" }],
+  ["scenef_resolve_board", { place: "purple monkey dishwasher" }],
+  // AN UNKNOWN REGION IS REFUSED in the hosted sentence, each id glossed with
+  // its place — not the REST door's own 400 text.
+  ["scenef_now", { region: "Honolulu" }],
 ];
 
 for (const [name, args] of PROBES) {
@@ -229,10 +279,9 @@ for (const [name, args] of PROBES) {
 
 // ————————————————————————————————————————————— the numbers and the nights
 //
-// The prose of these tools is laid out differently on the two transports by
-// design, so the text is not compared; the fields a caller branches on are,
-// read from structuredContent on both sides in the same second. Each probe
-// names the fields that must agree:
+// The fields a caller branches on, read from structuredContent on both
+// sides in the same second (the prose is held whole further down, in "the
+// words of an answer"). Each probe names the fields that must agree:
 //   discounts       today is the board's CALENDAR date in its own zone, not
 //                   the night the tonight slice rolled forward to — oahu is
 //                   three hours behind and crosses midnight at a different
@@ -272,7 +321,9 @@ const screeningEvidence = (s) => s ? {
     source_status: s.freshness.source_status, stale_after_hours: s.freshness.stale_after_hours } : null,
 } : null;
 const filmRows = (s) => (s?.films ?? []).map((f) => [f.slug, f.venue_count, f.showtime_count,
-  f.showtimes_complete, f.showtimes?.map(screeningEvidence), screeningEvidence(f.next_showtime)]);
+  f.showtimes_complete, f.showtimes?.map(screeningEvidence), screeningEvidence(f.next_showtime),
+  // A held film's entry carries no hook KEY at all (hosted filmExtras).
+  "hook" in f]);
 const planRows = (s) => (s?.plans ?? []).map((p) => [p.showtime?.screening_id, p.score, p.why, p.film?.url]);
 const wildcardRow = (s) => (s?.wildcard ? [s.wildcard.showtime?.screening_id, s.wildcard.score, s.wildcard.why, s.wildcard.film?.url] : null);
 const venueCounts = (s) => (s?.venues ?? []).map((v) => [v.venue_id, v.showtimes?.length]);
@@ -294,6 +345,11 @@ const FIELDS = [
   ["scenef_plan_movie_night", { region: REGIONAL_BOARD }, (s) => ({ ...same("window", "nights", "note", "discounts_relaxed", "plan_count")(s), plans: planRows(s), wildcard: wildcardRow(s) })],
   ["scenef_plan_movie_night", { region: REGIONAL_BOARD, preferences: { likes: ["horror"] } }, (s) => ({ ...same("window", "nights", "plan_count")(s), plans: planRows(s), wildcard: wildcardRow(s) })],
   ["scenef_plan_movie_night", { when: "today" }, same("window", "nights", "note", "plan_count", "plans", "wildcard")],
+  // A PREFERENCE NOTHING MEETS IS SAID (hosted 1b13eec, per item since
+  // e7b11e5): a format or genre absent from the bounded pool is a warning,
+  // in note and warnings[], and the discount fallback rides after it.
+  ["scenef_plan_movie_night", { when: "tomorrow", preferences: { time_after: "19:00", formats: ["35mm", "70mm"], likes: ["horror", "western"] } }, same("note", "warnings", "discounts_relaxed", "plan_count")],
+  ["scenef_plan_movie_night", { region: "oahu", when: "tomorrow", preferences: { discounts_only: true } }, same("note", "warnings", "discounts_relaxed")],
   ["scenef_coming_soon", { region: REGIONAL_BOARD, horizon_days: 7 }, (s) => ({ ...same("film_count")(s), first_row: s?.films?.[0] ? [s.films[0].slug, s.films[0].first_night, s.films[0].opening_venues] : null })],
   ["scenef_theater_info", { theater: "Roxie Theater San Francisco" }, (s) => ({ ...same("matched", "upcoming_count")(s), venue_id: s?.venue?.venue_id })],
 ];
@@ -324,7 +380,9 @@ for (const [name, args, fields] of FIELDS) {
     const args = { film: slug, region: REGIONAL_BOARD };
     const key = keyOf("scenef_search_showtimes", args);
     const { their, mine: r } = await pair("scenef_search_showtimes", args);
-    const pick = (s) => ({ ...same("matched", "showtime_count")(s), film_url: s?.film?.url, by_venue: venueCounts(s) });
+    // The rows are the nearest 40 of the total (hosted rowCap), and
+    // showtimes_complete and the cut note say so.
+    const pick = (s) => ({ ...same("matched", "showtime_count", "showtimes_complete", "note")(s), film_url: s?.film?.url, by_venue: venueCounts(s) });
     const mineF = pick(r.structuredContent);
     const theirF = pick(their.structuredContent);
     for (const k of Object.keys(theirF)) {
@@ -420,9 +478,9 @@ const keysOf = (o) => Object.keys(o ?? {}).sort().join(", ");
 
 // ———————————————————————————————————————————————— the header line
 //
-// The one line of whats_playing prose that is mirrored verbatim: the label
-// already carries the night for tomorrow and date windows, and this server
-// appended it again ("tomorrow, Thursday, September 10, Thursday,
+// The first line of whats_playing prose, held on its own because it is the
+// one that broke: the label already carries the night for tomorrow and date
+// windows, and this server appended it again ("tomorrow, Thursday, September 10, Thursday,
 // September 10"). Read as the first line of the answer — the notable lead
 // never rides a window that is not tonight.
 for (const args of [
@@ -454,7 +512,15 @@ for (const args of [
     const args = { film: slug };
     const key = keyOf("scenef_film_details", args);
     const { their, mine: r } = await pair("scenef_film_details", args);
-    const pick = same("matched", "final_night", "is_last_night", "showtime_count");
+    // The card's KEY SET is compared too: a film held back by the hosted
+    // withheldDetail() (an NC-17 or X certificate, or a synopsis word on its
+    // list) omits overview, poster_url and trailer_url, and no card carries
+    // backdrop art or a ratings object.
+    const pick = (s) => ({
+      ...same("matched", "final_night", "is_last_night", "showtime_count", "showtimes_complete", "note")(s),
+      film_keys: keysOf(s?.film),
+      shown: s?.showtimes?.length,
+    });
     const mineF = pick(r.structuredContent);
     const theirF = pick(their.structuredContent);
     for (const k of Object.keys(theirF)) {
@@ -470,6 +536,54 @@ for (const args of [
   if (found) console.log(`        (${found} is on its last night on the hosted board — the flag agreed)`);
   else if (slugs.length) console.log(`        (no film among the first ${slugs.length} tonight is on its last night on the hosted board — the flag agreed as false on each)`);
   else console.log("  skip  scenef_film_details is_last_night — the hosted board returned no films for tonight");
+}
+
+// ———————————————————————————————————————————— the films held back
+//
+// THE LISTING STAYS; THE SYNOPSIS AND THE ART STAND BACK (hosted 7188e71).
+// The films are found on the default board's open feed with the same
+// predicate both servers apply; each is asked of both transports, and the
+// card's key set, the prose's silence about the synopsis and the trailer,
+// and the whats_playing entry's missing hook must agree. A board with no
+// such film today skips, and says so.
+{
+  let held = [];
+  try {
+    const res = await fetch("https://scenef.com/api/listings", { headers: { accept: "application/json" } });
+    const feed = await res.json();
+    const firstNight = new Map();
+    for (const sc of feed.screenings ?? []) {
+      if (Date.parse(sc.startsAt) < Date.now()) continue;
+      const cur = firstNight.get(sc.filmKey);
+      if (!cur || sc.nightOf < cur) firstNight.set(sc.filmKey, sc.nightOf);
+    }
+    held = (feed.films ?? []).filter((f) => withheldDetail(f) && firstNight.has(f.key)).slice(0, 3)
+      .map((f) => ({ slug: f.slug, night: firstNight.get(f.key), overview: f.overview ?? "" }));
+  } catch (err) {
+    console.log(`  skip  held films — the open feed could not be read (${err?.message ?? err})`);
+  }
+  if (!held.length) console.log("  skip  held films — no film on the default board is held back today");
+  for (const h of held) {
+    const args = { film: h.slug };
+    const key = keyOf("scenef_film_details", args);
+    const { their, mine: r } = await pair("scenef_film_details", args);
+    const a = keysOf(r.structuredContent?.film);
+    const b = keysOf(their.structuredContent?.film);
+    check(a === b, `${key} held film card has the hosted key set`, a === b ? "" : `local : ${a}\n        hosted: ${b}`);
+    const leaks = ["overview", "poster_url", "trailer_url", "backdrop_url", "hook"].filter((k) => k in (r.structuredContent?.film ?? {}));
+    check(!leaks.length, `${key} held film card omits the synopsis and the art`, leaks.join(", "));
+    const t = textOf(r);
+    check(!/Trailer: |Poster: /.test(t) && !(h.overview && t.includes(h.overview.slice(0, 40))), `${key} held film prose prints no synopsis, trailer or poster`);
+    const wargs = { when: h.night, max_results: 25 };
+    const { their: wt, mine: wm } = await pair("scenef_whats_playing", wargs);
+    const pick = (sc) => (sc?.films ?? []).find((f) => f.slug === h.slug);
+    const he = pick(wt.structuredContent), me = pick(wm.structuredContent);
+    if (!he) {
+      console.log(`  skip  ${keyOf("scenef_whats_playing", wargs)} — the hosted answer did not list ${h.slug}`);
+      continue;
+    }
+    check(!!me && !("hook" in me) && !("hook" in he), `${keyOf("scenef_whats_playing", wargs)} ${h.slug} entry carries no hook key on either transport`);
+  }
 }
 
 // ————————————————————————————————————— film urls off a non-default board
@@ -502,6 +616,72 @@ for (const [name, args, films] of URL_SHAPE) {
     `${key} every film url fits the hosted shape ${shape}`,
     wrong.length ? wrong.slice(0, 3).map((f) => f.url).join(", ") : mineFilms.length ? "" : "no films returned locally",
   );
+}
+
+// ———————————————————————————————————————————— the words of an answer
+//
+// THE PROSE IS THE HOSTED PROSE (1.6.1): every renderer in src/tools.js is
+// the hosted one in src/lib/mcp/tools.ts, line for line, so an answer is
+// compared whole, as a miss is above. Two allowances, both stated:
+//   - the two must have read the SAME board copy. The REST doors are
+//     edge-cached and the hosted server reads the dataset in process, so for
+//     a minute after the board regenerates they can hold different copies;
+//     when data_as_of differs the probe says so and is not compared;
+//   - scenef_now ends with "Data: generated …", which the hosted server
+//     follows with venue ingest health that has no REST door (the RECORDED
+//     GAP in src/tools.js). Its text is compared up to that line.
+// scenef_accuracy is held by its structure in test/reliability.js: its
+// record is a separate edge-cached door whose tallies move between calls.
+{
+  const { their: nowLA } = await pair("scenef_now", { region: REGIONAL_BOARD });
+  const slug = nowLA.structuredContent?.next_curtains?.[0]?.film?.slug;
+  const WHOLE = [
+    ["scenef_discounts", {}],
+    ["scenef_discounts", { region: "oahu", response_format: "detailed" }],
+    ["scenef_theater_info", { theater: "Roxie Theater San Francisco" }],
+    ["scenef_theater_info", { theater: "castro", response_format: "detailed" }],
+    ["scenef_whats_playing", { when: "tomorrow", max_results: 3, region: REGIONAL_BOARD }],
+    ["scenef_whats_playing", { when: "tomorrow", max_results: 3, region: REGIONAL_BOARD, response_format: "detailed" }],
+    ["scenef_search_showtimes", { venues: ["amc"], region: REGIONAL_BOARD, date: "tonight" }],
+    ["scenef_search_showtimes", { venues: ["amc"], region: REGIONAL_BOARD, date: TOMORROW, response_format: "detailed" }],
+    ...(slug ? [["scenef_film_details", { film: slug, region: REGIONAL_BOARD, response_format: "detailed" }]] : []),
+    ["scenef_plan_movie_night", { region: REGIONAL_BOARD }],
+    ["scenef_plan_movie_night", { region: REGIONAL_BOARD, response_format: "detailed", party_size: 2 }],
+    ["scenef_coming_soon", { region: REGIONAL_BOARD, horizon_days: 7 }],
+    ["scenef_coming_soon", { region: REGIONAL_BOARD, horizon_days: 7, response_format: "detailed" }],
+    ["scenef_now", { region: REGIONAL_BOARD }],
+    ["scenef_now", { region: "oahu", response_format: "detailed" }],
+  ];
+  const upToData = (t) => t.split("\nData: generated ")[0];
+  for (const [name, args] of WHOLE) {
+    const key = keyOf(name, args);
+    const { their, mine: r } = await pair(name, args);
+    const a = r.structuredContent?.data_as_of, b = their.structuredContent?.data_as_of;
+    if (a !== b) {
+      console.log(`  skip  ${key} whole answer — the two read different board copies this second (local ${a}, hosted ${b})`);
+      continue;
+    }
+    const cut = name === "scenef_now" ? upToData : (t) => t;
+    const mineText = cut(textOf(r));
+    const theirText = cut(textOf(their));
+    check(mineText === theirText, `${key} answers with the hosted words, whole`, mineText === theirText ? "" : whereTheyDiffer(mineText, theirText));
+  }
+}
+
+// AN UNKNOWN TOOL IS A PROTOCOL ERROR on both transports — JSON-RPC -32602,
+// the same message — never a tool result marked isError.
+{
+  const refusal = async (c) => {
+    try {
+      const r = await c.callTool({ name: "scenef_nope", arguments: {} });
+      return `result isError=${r.isError}: ${textOf(r)}`;
+    } catch (err) {
+      return `error ${err?.code}: ${err?.message}`;
+    }
+  };
+  const a = await refusal(local);
+  const b = await refusal(hosted);
+  check(a === b, "tools/call scenef_nope is refused the way the hosted server refuses it", a === b ? "" : `local : ${a}\n        hosted: ${b}`);
 }
 
 await hosted.close();

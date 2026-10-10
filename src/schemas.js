@@ -109,6 +109,10 @@ export const searchOut = z.object({
   unknown_venues: z.array(z.string()),
   coverage_note: z.string().nullable(),
   showtime_count: z.number(),
+  // showtime_count is every match; the rows below are the nearest 40
+  // (concise) or 200 (detailed). Optional because a refusal ran no search.
+  showtimes_complete: z.boolean().optional().describe("Whether the rows returned are all showtime_count matches. When false, narrow by date or theater for the rest."),
+  note: z.string().nullable().optional(),
   // In venue mode each showtime carries its own film — there the film is the
   // answer rather than the query, and a bare list of times is unreadable.
   venues: z.array(
@@ -138,6 +142,8 @@ export const filmDetailsOut = z.object({
   final_night: z.string().nullable().optional(),
   is_last_night: z.boolean().optional(),
   showtime_count: z.number().optional(),
+  showtimes_complete: z.boolean().optional().describe("Whether showtimes holds all showtime_count screenings. The nearest 40 (concise) or 200 (detailed) are returned."),
+  note: z.string().nullable().optional(),
   showtimes: z.array(screeningOut).optional(),
 });
 
@@ -147,8 +153,8 @@ export const planOut = z.object({
   nights: z.array(z.string()),
   party_size: z.number().nullable(),
   note: z.string().nullable(),
-  discounts_relaxed: z.boolean(),
   warnings: z.array(z.string()),
+  discounts_relaxed: z.boolean(),
   plan_count: z.number(),
   plans: z.array(
     loose({
@@ -196,10 +202,13 @@ export const nowOut = z.object({
   screenings_tonight: z.number(),
   still_to_come: z.number(),
   next_curtains: z.array(screeningOut.extend({ film: filmOut.nullable() })),
+  // Every board a caller may pass as `region`, with the wall clock its
+  // times mean. Optional because it rides only on a call that named no
+  // region.
+  boards: z
+    .array(z.object({ region: z.string(), name: z.string(), timezone: z.string() }))
+    .optional(),
   sources: loose({ healthy: z.number(), total: z.number() }),
-  boards: z.array(
-    z.object({ region: z.string(), name: z.string(), timezone: z.string() }),
-  ),
 });
 
 /** The published shape of the accuracy record. Loose where the record may
@@ -239,9 +248,10 @@ export const accuracyOutput = z.object({
 /** ——— scenef_resolve_board ———
  *  Four shapes in one object, and the discriminator is `ok`. Everything past
  *  it is optional because a refusal carries different evidence than a hit:
- *  candidates for an ambiguity, nearest_lit and a note for a place we cover
- *  and have not published. A schema that required them all would force empty
- *  arrays into answers that have nothing to say. */
+ *  candidates for an ambiguity, a note for a place no published board covers
+ *  or a name it can neither place nor rule out, and nearest_lit only when a
+ *  published board is within 100 miles of it. A schema that required them
+ *  all would force empty arrays into answers that have nothing to say. */
 export const placeOut = z.object({
   ok: z.boolean(),
   input: z.string(),

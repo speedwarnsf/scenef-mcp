@@ -30,13 +30,37 @@ const TTL_MS = 60_000;
 
 const cache = new Map();
 
-async function getJson(path) {
-  const hit = cache.get(path);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.value;
+// ——————————————————————————————————————————— A STALE EDGE COPY IS NOT AN ANSWER
+//
+// The REST doors are cached at Vercel's edge with stale-while-revalidate
+// 86400: once a copy passes its s-maxage, the NEXT request is answered from
+// that old copy (`x-vercel-cache: STALE`) while the edge refetches behind it.
+// The hosted MCP server reads the current dataset in process and never sees
+// such a copy, so serving one here answered with an older board — on
+// 2026-10-10 a local scenef_accuracy carried data_as_of seven hours behind
+// the hosted one, in the same second. Measured that day, the revalidation a
+// STALE answer triggers lands within ~0.4 s on every board probed, so a
+// STALE copy is asked for again after a short wait, up to three times.
+// If the edge is still serving the old copy after that (the origin failing
+// to revalidate), the copy is used rather than nothing, held in this
+// process's cache only briefly, and marked: edgeStaleness(value) reports
+// it, and every answer built on it says so (shape.js finish()).
+const STALE_RETRY_MS = [400, 800, 1600];
+const STALE_HOLD_MS = 10_000;
+const staleCopies = new WeakMap();
 
-  let res;
+/** Set when the edge served this value from an expired copy and did not
+ *  refresh it on retry: { age_s, tries }. Undefined for a current copy. */
+export function edgeStaleness(value) {
+  return value && typeof value === "object" ? staleCopies.get(value) : undefined;
+}
+
+const isEdgeStale = (res) => /^stale$/i.test(res.headers.get("x-vercel-cache") ?? "");
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function request(path) {
   try {
-    res = await fetch(`${BASE}${path}`, {
+    return await fetch(`${BASE}${path}`, {
       headers: { accept: "application/json", "user-agent": USER_AGENT },
       signal: AbortSignal.timeout(15_000),
     });
@@ -45,20 +69,64 @@ async function getJson(path) {
       `Could not reach ${BASE}${path} (${err?.message ?? err}). This server reads the live SceneF feed and has no offline copy.`,
     );
   }
+}
+
+async function getJson(path) {
+  const hit = cache.get(path);
+  if (hit && Date.now() - hit.at < TTL_MS) return hit.value;
+
+  let res = await request(path);
+
+  if (res.ok && isEdgeStale(res)) {
+    // Keep the stale copy in hand: a retry that fails must not turn an old
+    // answer into no answer.
+    const staleValue = await res.json();
+    let ageS = Number(res.headers.get("age"));
+    let tries = 0;
+    for (const wait of STALE_RETRY_MS) {
+      await sleep(wait);
+      tries += 1;
+      let again;
+      try {
+        again = await request(path);
+      } catch {
+        break;
+      }
+      if (!again.ok) {
+        await again.body?.cancel?.();
+        break;
+      }
+      if (!isEdgeStale(again)) {
+        res = again;
+        break;
+      }
+      ageS = Number(again.headers.get("age"));
+      await again.body?.cancel?.();
+    }
+    if (isEdgeStale(res)) {
+      staleCopies.set(staleValue, { age_s: Number.isFinite(ageS) ? ageS : null, tries });
+      cache.set(path, { at: Date.now() - TTL_MS + STALE_HOLD_MS, value: staleValue });
+      return staleValue;
+    }
+  }
 
   if (!res.ok) {
     // The feed refuses unusable parameters with a warnings[] array rather than
     // silently serving the whole board. Pass that reason through — it is the
     // most useful thing a caller can be told.
     let detail = "";
+    let body = null;
     try {
-      const body = await res.json();
+      body = await res.json();
       if (Array.isArray(body?.warnings) && body.warnings.length) detail = ` — ${body.warnings.join(" ")}`;
       else if (body?.error) detail = ` — ${body.error}`;
     } catch {
       /* body was not json; the status is the whole story */
     }
-    throw new Error(`SceneF ${path} answered ${res.status}${detail}`);
+    const err = new Error(`SceneF ${path} answered ${res.status}${detail}`);
+    err.status = res.status;
+    err.body = body;
+    throw err;
   }
 
   const value = await res.json();
@@ -77,6 +145,35 @@ export function listings(params = {}) {
   }
   const qs = sp.toString();
   return getJson(`/api/listings${qs ? `?${qs}` : ""}`);
+}
+
+/**
+ * ONE BOARD, NAMED OR DEFAULT — the hosted datasetFor() (src/app/mcp/
+ * [transport]/route.ts) over the REST door. A blank region is the default
+ * board; any other is sent trimmed, and the door accepts or refuses it with
+ * the same resolveRegionParam() the hosted server calls. A refusal is the
+ * hosted sentence — `Unknown region "X". Valid regions: id (name), …` —
+ * glossed from /api/boards, whose order is the region table's. When the
+ * roster cannot be read the REST refusal is passed through as it came,
+ * rather than a list being invented.
+ */
+export async function boardFeed(region) {
+  const raw = typeof region === "string" ? region.trim() : "";
+  if (!raw) return listings();
+  try {
+    return await listings({ region: raw });
+  } catch (err) {
+    const refused = err?.status === 400 && (err.body?.warnings ?? []).some((w) => /^Unknown region=/.test(String(w)));
+    if (!refused) throw err;
+    const boards = await boardsList();
+    if (!boards?.length) throw err;
+    const clipped = raw.length > 80 ? `${raw.slice(0, 79)}…` : raw;
+    throw new Error(
+      `Unknown region "${clipped}". Valid regions: ${boards
+        .map((b) => (b.name && b.name.toLowerCase() !== b.region.toLowerCase() ? `${b.region} (${b.name})` : b.region))
+        .join(", ")}.`,
+    );
+  }
 }
 
 /** The verification record — returned by scenef_accuracy verbatim. */
@@ -109,7 +206,9 @@ export async function boardsList() {
       .filter((b) => b && b.region && b.name && b.timezone)
       .map((b) => ({ region: b.region, name: b.name, timezone: b.timezone }));
     if (value.length) {
-      boardsCache = { at: Date.now(), value };
+      // An expired edge copy is used for this answer but not held for the
+      // hour: the next call asks the edge again.
+      if (!edgeStaleness(d)) boardsCache = { at: Date.now(), value };
       return value;
     }
   } catch {
@@ -174,7 +273,7 @@ export const CATCHABLE_GRACE_MIN = 20;
 
 /** A zone Intl accepts, or the default — the hosted safeZone(). A feed
  *  that named a zone this runtime lacks must not throw out of every tool. */
-function safeZone(tz) {
+export function safeZone(tz) {
   if (!tz || typeof tz !== "string") return DEFAULT_TZ;
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: tz });
